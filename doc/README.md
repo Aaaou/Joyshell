@@ -17,5 +17,7 @@ This directory records Joyshell implementation notes by component. Each note sho
 - [SFTP File Browser](components/sftp-file-browser.md)
 - [SFTP Resume And Retry](components/sftp-resume-retry.md)
 - [SFTP And Terminal Concurrency](components/sftp-terminal-concurrency.md)
+- [Local SQLite Profile Store](components/local-sqlite-profile-store.md)
+- [Startup Splash](components/startup-splash.md)
 - [Icon Assets Attribution](components/icon-assets-attribution.md)
 - [Font Assets Attribution](components/font-assets-attribution.md)

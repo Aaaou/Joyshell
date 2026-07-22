@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="JOY line logo for light taskbar">
+  <circle cx="16" cy="16" r="12.25" fill="none" stroke="#0b1118" stroke-width="2.7"/>
+  <path d="M11 10.25 L17.25 16 L11 21.75" fill="none" stroke="#0b1118" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M18.75 21.75 H23.25" fill="none" stroke="#0b1118" stroke-width="3.1" stroke-linecap="round"/>
+</svg>

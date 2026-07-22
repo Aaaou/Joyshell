@@ -3,8 +3,11 @@ import type {
   AgentToolCallPreview,
   AssistantDefinition,
   AuditEntry,
+  CommandSnippet,
+  LayoutSettings,
   RemoteDirectoryListing,
   SessionInfo,
+  SessionFolder,
   SessionProfile,
   SftpProgress,
   SystemSnapshot
@@ -12,7 +15,49 @@ import type {
 
 const canUseTauri = "__TAURI_INTERNALS__" in window;
 
-const demoProfiles: SessionProfile[] = [];
+const previewDragTest = !canUseTauri && window.location.search.includes("dragTest=1");
+const demoFolders: SessionFolder[] = previewDragTest
+  ? [
+      { id: "preview-folder-alpha", name: "项目 Alpha", parent_id: null },
+      { id: "preview-folder-beta", name: "项目 Beta", parent_id: null }
+    ]
+  : [];
+const demoProfiles: SessionProfile[] = previewDragTest
+  ? [
+      {
+        id: "preview-profile-alpha",
+        name: "Alpha SSH",
+        group: "项目 Alpha",
+        host: "192.168.1.10",
+        port: 22,
+        username: "root",
+        tags: ["linux"],
+        favorite: false,
+        sort_order: 0
+      },
+      {
+        id: "preview-profile-beta",
+        name: "Beta SSH",
+        group: "项目 Beta",
+        host: "192.168.1.11",
+        port: 22,
+        username: "root",
+        tags: ["linux"],
+        favorite: false,
+        sort_order: 1
+      }
+    ]
+  : [];
+const demoCommands: CommandSnippet[] = [];
+const defaultLayoutSettings: LayoutSettings = {
+  restore_last_layout: false,
+  default_left_sidebar_open: true,
+  default_right_sidebar_open: true,
+  default_bottom_panel_open: true,
+  last_left_sidebar_open: true,
+  last_right_sidebar_open: true,
+  last_bottom_panel_open: true
+};
 
 export async function listProfiles(): Promise<SessionProfile[]> {
   if (canUseTauri) {
@@ -21,11 +66,32 @@ export async function listProfiles(): Promise<SessionProfile[]> {
   return demoProfiles;
 }
 
+export async function listFolders(): Promise<SessionFolder[]> {
+  if (canUseTauri) {
+    return invoke("list_folders");
+  }
+  return demoFolders;
+}
+
 export async function connectProfile(profileId: string): Promise<SessionInfo> {
   if (canUseTauri) {
     return invoke("connect_profile", { profileId });
   }
   throw new Error("网页预览没有 Tauri/Rust 后端，不能执行真实 SSH 连接。请使用桌面安装包或 Tauri dev 运行。");
+}
+
+export async function disconnectProfile(profileId: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("disconnect_profile", { profileId });
+  }
+}
+
+export async function writeClipboardText(text: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("write_clipboard_text", { text });
+    return;
+  }
+  await navigator.clipboard.writeText(text);
 }
 
 export async function saveProfile(profile: SessionProfile, password?: string): Promise<SessionProfile> {
@@ -44,6 +110,82 @@ export async function saveProfile(profile: SessionProfile, password?: string): P
     demoProfiles.push(profile);
   }
   return profile;
+}
+
+export async function saveFolder(folder: SessionFolder): Promise<SessionFolder> {
+  if (canUseTauri) {
+    return invoke("save_folder", { folder });
+  }
+  const existingIndex = demoFolders.findIndex((item) => item.id === folder.id);
+  if (existingIndex >= 0) {
+    demoFolders[existingIndex] = folder;
+  } else {
+    demoFolders.push(folder);
+  }
+  return folder;
+}
+
+export async function deleteFolder(folderId: string): Promise<string | null> {
+  if (canUseTauri) {
+    return invoke("delete_folder", { folderId });
+  }
+  const existingIndex = demoFolders.findIndex((item) => item.id === folderId);
+  if (existingIndex < 0) {
+    return null;
+  }
+  const [folder] = demoFolders.splice(existingIndex, 1);
+  for (const profile of demoProfiles) {
+    if (profile.group === folder.name) {
+      profile.group = null;
+    }
+  }
+  return folder.name;
+}
+
+export async function listCommandSnippets(): Promise<CommandSnippet[]> {
+  if (canUseTauri) {
+    return invoke("list_command_snippets");
+  }
+  return demoCommands;
+}
+
+export async function saveCommandSnippet(snippet: CommandSnippet): Promise<CommandSnippet> {
+  if (canUseTauri) {
+    return invoke("save_command_snippet", { snippet });
+  }
+  const existingIndex = demoCommands.findIndex((item) => item.id === snippet.id);
+  if (existingIndex >= 0) {
+    demoCommands[existingIndex] = snippet;
+  } else {
+    demoCommands.unshift(snippet);
+  }
+  return snippet;
+}
+
+export async function deleteCommandSnippet(id: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("delete_command_snippet", { id });
+    return;
+  }
+  const existingIndex = demoCommands.findIndex((item) => item.id === id);
+  if (existingIndex >= 0) {
+    demoCommands.splice(existingIndex, 1);
+  }
+}
+
+export async function getLayoutSettings(): Promise<LayoutSettings> {
+  if (canUseTauri) {
+    return invoke("get_layout_settings");
+  }
+  return defaultLayoutSettings;
+}
+
+export async function saveLayoutSettings(settings: LayoutSettings): Promise<LayoutSettings> {
+  if (canUseTauri) {
+    return invoke("save_layout_settings", { settings });
+  }
+  Object.assign(defaultLayoutSettings, settings);
+  return settings;
 }
 
 function toBackendProfile(profile: SessionProfile) {
@@ -94,7 +236,8 @@ export async function collectSystemSnapshot(sessionId: string): Promise<SystemSn
       kernel_name: "",
       kernel_release: "",
       architecture: "",
-      primary_ip: null
+      primary_ip: null,
+      device_model: null
     },
     uptime_seconds: 0,
     load: { one: 0, five: 0, fifteen: 0, runnable_processes: 0, total_processes: 0, last_pid: 0 },
@@ -111,8 +254,9 @@ export async function collectSystemSnapshot(sessionId: string): Promise<SystemSn
       guest_nice: 0
     },
     cpu_cores: [],
-    cpu_info: { model_name: "Unknown CPU", logical_cores: 0, physical_cores: null, mhz: null },
+    cpu_info: { model_name: "Unknown CPU", raw_part: null, logical_cores: 0, physical_cores: null, mhz: null },
     memory: { total_bytes: 0, used_bytes: 0, free_bytes: 0, available_bytes: 0 },
+    memory_info: { frequency_mhz: null },
     swap: { total_bytes: 0, used_bytes: 0, free_bytes: 0, available_bytes: 0 },
     processes: { total: 0, running: 0, sleeping: 0, stopped: 0, zombie: 0, threads: 0 },
     network: [],
@@ -206,6 +350,14 @@ export async function cancelSftpTransfer(transferId: string): Promise<void> {
   if (canUseTauri) {
     await invoke("cancel_sftp_transfer", { transferId });
   }
+}
+
+export async function revealLocalPath(path: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("reveal_local_path", { path });
+    return;
+  }
+  console.debug("preview reveal local path", path);
 }
 
 export async function listAssistants(): Promise<AssistantDefinition[]> {

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Joyshell Circular Text Logo Export</title>
+    <style>
+      :root {
+        color: #101820;
+        background: #f8fafc;
+        font-family: Inter, "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        place-items: center;
+      }
+
+      main {
+        display: grid;
+        gap: 18px;
+        width: min(920px, calc(100vw - 48px));
+      }
+
+      .preview {
+        display: grid;
+        grid-template-columns: 360px minmax(0, 1fr);
+        gap: 24px;
+        align-items: center;
+        padding: 24px;
+        border: 1px solid #e3e7eb;
+        border-radius: 18px;
+        background: #ffffff;
+      }
+
+      svg,
+      img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+      }
+
+      p {
+        margin: 8px 0 0;
+        color: #30363d;
+        line-height: 1.6;
+      }
+
+      button {
+        width: max-content;
+        height: 34px;
+        margin-top: 14px;
+        padding: 0 14px;
+        border: 1px solid #d7dde4;
+        border-radius: 9px;
+        background: #ffffff;
+        color: #101820;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #f4f6f8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="preview">
+        <div id="logo-root"></div>
+        <div>
+          <h1>Joyshell circular text logo</h1>
+          <p>透明外边界、圆形白色主体、放大 JOY 文本。用于 Windows taskbar、安装包和手动导出。</p>
+          <button type="button" id="download-svg">下载 SVG</button>
+        </div>
+      </section>
+      <section class="preview">
+        <img src="./joyshell-taskbar-logo-preview.png" alt="PNG preview" />
+        <div>
+          <h1>PNG preview</h1>
+          <p>这是当前打包图标的 600px 预览，实际 Tauri 使用同源生成的 32/128/256/512 PNG 和 ICO。</p>
+        </div>
+      </section>
+    </main>
+
+    <template id="logo-template">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" role="img" aria-label="Joyshell circular text logo">
+        <defs>
+          <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#10141a" flood-opacity="0.18" />
+          </filter>
+        </defs>
+        <circle cx="300" cy="300" r="252" fill="#ffffff" stroke="#121820" stroke-width="10" filter="url(#soft-shadow)" />
+        <circle cx="300" cy="300" r="224" fill="none" stroke="#121820" stroke-width="2.8" opacity="0.72" />
+        <g fill="none" stroke="#101820" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M150 224 H205 Q226 224 226 247 V333 Q226 385 171 385 Q130 385 116 346" />
+          <circle cx="302" cy="308" r="66" />
+          <path d="M282 287 L314 316 L282 345" />
+          <path d="M323 337 H342" stroke-width="10" />
+          <path d="M410 224 L466 290 L522 224" />
+          <path d="M466 290 V386" />
+        </g>
+      </svg>
+    </template>
+
+    <script>
+      const template = document.querySelector("#logo-template");
+      const root = document.querySelector("#logo-root");
+      root.append(template.content.cloneNode(true));
+
+      document.querySelector("#download-svg").addEventListener("click", () => {
+        const source = new XMLSerializer().serializeToString(root.querySelector("svg"));
+        const blob = new Blob([source], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "joyshell-taskbar-logo.svg";
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    </script>
+  </body>
+</html>

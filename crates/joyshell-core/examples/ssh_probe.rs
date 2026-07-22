@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
         host_key_policy: HostKeyPolicy::AcceptNew,
         tags: Vec::new(),
         favorite: false,
+        sort_order: 0,
         jump_host_id: None,
     };
 

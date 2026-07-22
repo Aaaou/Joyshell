@@ -59,6 +59,22 @@ UI state:
 - `TransferStatus::Retrying { attempt, max_attempts, reason }` is emitted before retrying.
 - The frontend treats `Retrying` as active, so cancel still works.
 - Failed state preserves the latest known byte count instead of resetting to `0B`.
+- Transfer queue metrics intentionally keep byte progress lively while smoothing speed and ETA with a slower moving average.
+- Completed, failed, and cancelled queue items hide the live speed metric.
+- Queue items expose a desktop context menu for opening the local file location, copying local/remote paths, retrying inactive jobs, cancelling active jobs, and removing inactive records.
+
+## Pause Decision
+
+Pause is not exposed in the current MVP.
+
+The backend currently supports cancellation plus resume/retry. A real pause feature should preserve queue state, close or park the active SFTP handle predictably, and resume from the verified offset. Showing a pause button before that worker/queue state machine exists would risk a fake pause where the UI stops but the socket or file handle remains active.
+
+For now the intended control model is:
+
+- cancel an active transfer,
+- keep the partial file,
+- retry the queue item,
+- resume from the local or remote offset.
 
 ## Current Limits
 
@@ -68,6 +84,7 @@ This is resume-within-current-session. If the underlying SSH session becomes unu
 - reconnect SSH/SFTP with the saved profile,
 - verify remote/local size and optional checksum,
 - continue from offset after reconnection,
+- true pause/resume backed by persistent queue state,
 - expose pause/resume controls in the UI.
 
 Also, offset resume assumes the partial local/remote file belongs to the same source file. Mature clients often prompt before overwrite/resume when metadata does not match; Joyshell should add that confirmation before public release.

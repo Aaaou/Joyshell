@@ -8,6 +8,7 @@ import { useEffect, useRef } from "react";
 
 export type JoyTerminalHandle = {
   write(data: string): void;
+  replace(data: string): void;
   focus(): void;
   fit(): void;
   clear(): void;
@@ -57,11 +58,60 @@ function keyEventToTerminalData(event: KeyboardEvent<HTMLDivElement>) {
   }
 }
 
+function readThemeColor(name: string, fallback: string) {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return resolveCssColor(value || fallback, fallback);
+}
+
+function resolveCssColor(value: string, fallback: string) {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return fallback;
+  }
+
+  const probe = document.createElement("span");
+  probe.style.position = "absolute";
+  probe.style.visibility = "hidden";
+  probe.style.pointerEvents = "none";
+  probe.style.color = value;
+  document.body.appendChild(probe);
+  const resolved = window.getComputedStyle(probe).color;
+  probe.remove();
+  return resolved || fallback;
+}
+
+function createTerminalTheme() {
+  return {
+    background: readThemeColor("--joy-terminal-background", "#f7f9fb"),
+    foreground: readThemeColor("--joy-terminal-foreground", "#101820"),
+    cursor: readThemeColor("--joy-accent", "#1677ff"),
+    selectionBackground: "rgba(22, 119, 255, 0.22)",
+    black: "#111820",
+    red: "#c72020",
+    green: "#087a35",
+    yellow: "#9a6300",
+    blue: "#075fd7",
+    magenta: "#8c2bb5",
+    cyan: "#007a8c",
+    white: "#111820",
+    brightBlack: "#4e5a66",
+    brightRed: "#e12929",
+    brightGreen: "#0b963f",
+    brightYellow: "#c07a00",
+    brightBlue: "#1677ff",
+    brightMagenta: "#a842d1",
+    brightCyan: "#0097aa",
+    brightWhite: "#05080c"
+  };
+}
+
 export function JoyTerminal({
   id,
   initialOutput,
-  fontFamily = "Cascadia Mono, JetBrains Mono, Consolas, monospace",
-  fontSize = 13,
+  fontFamily = "Cascadia Mono, JetBrains Mono, Consolas, Alimama FangYuanTi, Microsoft YaHei UI, monospace",
+  fontSize = 13.5,
   onInput,
   onReady
 }: JoyTerminalProps) {
@@ -88,15 +138,12 @@ export function JoyTerminal({
       allowProposedApi: false,
       convertEol: true,
       cursorBlink: true,
+      drawBoldTextInBrightColors: false,
       fontFamily,
       fontSize,
+      minimumContrastRatio: 7,
       scrollback: 10_000,
-      theme: {
-        background: "#0e1c26",
-        foreground: "#e9f1f7",
-        cursor: "#62b6ff",
-        selectionBackground: "rgba(79, 179, 255, 0.28)"
-      }
+      theme: createTerminalTheme()
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
@@ -116,6 +163,11 @@ export function JoyTerminal({
     fitRef.current = fit;
     onReadyRef.current?.({
       write: (data) => terminal.write(data),
+      replace: (data) => {
+        terminal.options.theme = createTerminalTheme();
+        terminal.reset();
+        terminal.write(data);
+      },
       focus: () => terminal.focus(),
       fit: () => fit.fit(),
       clear: () => terminal.clear(),
@@ -133,7 +185,7 @@ export function JoyTerminal({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [fontFamily, fontSize, id, initialOutput]);
+  }, [fontFamily, fontSize]);
 
   return (
     <div

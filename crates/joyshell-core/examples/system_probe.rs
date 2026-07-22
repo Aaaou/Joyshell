@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
         host_key_policy: HostKeyPolicy::AcceptNew,
         tags: Vec::new(),
         favorite: false,
+        sort_order: 0,
         jump_host_id: None,
     };
 
@@ -40,6 +41,10 @@ async fn main() -> anyhow::Result<()> {
         snapshot.host.primary_ip.as_deref().unwrap_or("-")
     );
     println!(
+        "device={}",
+        snapshot.host.device_model.as_deref().unwrap_or("-")
+    );
+    println!(
         "load={:.2},{:.2},{:.2} procs={}/{} uptime={:.0}s",
         snapshot.load.one,
         snapshot.load.five,
@@ -49,9 +54,10 @@ async fn main() -> anyhow::Result<()> {
         snapshot.uptime_seconds
     );
     println!(
-        "cpu cores={} model={} user={} system={} idle={}",
+        "cpu cores={} model={} part={} user={} system={} idle={}",
         snapshot.cpu_info.logical_cores,
         snapshot.cpu_info.model_name,
+        snapshot.cpu_info.raw_part.as_deref().unwrap_or("-"),
         snapshot.cpu.user,
         snapshot.cpu.system,
         snapshot.cpu.idle

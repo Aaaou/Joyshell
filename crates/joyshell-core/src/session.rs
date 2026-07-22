@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -30,7 +30,9 @@ const SYSTEM_SYNC_MAX_ATTEMPTS: u32 = 2;
 const SFTP_TRANSFER_TIMEOUT_MS: u32 = 60_000;
 const SFTP_TRANSFER_MAX_ATTEMPTS: u32 = 4;
 const SFTP_TRANSFER_BACKOFF_MS: u64 = 900;
-const SFTP_TRANSFER_BUFFER_SIZE: usize = 64 * 1024;
+const SFTP_TRANSFER_BUFFER_SIZE: usize = 128 * 1024;
+const SFTP_PROGRESS_MIN_INTERVAL_MS: u64 = 120;
+const SFTP_PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HostKeyPolicy {
@@ -63,6 +65,7 @@ pub struct SessionProfile {
     pub host_key_policy: HostKeyPolicy,
     pub tags: Vec<String>,
     pub favorite: bool,
+    pub sort_order: i64,
     pub jump_host_id: Option<SessionId>,
 }
 
@@ -120,6 +123,7 @@ pub struct CpuCoreSample {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfoSample {
     pub model_name: String,
+    pub raw_part: Option<String>,
     pub logical_cores: u64,
     pub physical_cores: Option<u64>,
     pub mhz: Option<f64>,
@@ -131,6 +135,11 @@ pub struct MemorySample {
     pub used_bytes: u64,
     pub free_bytes: u64,
     pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInfoSample {
+    pub frequency_mhz: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +177,7 @@ pub struct HostInfoSample {
     pub kernel_release: String,
     pub architecture: String,
     pub primary_ip: Option<String>,
+    pub device_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +200,7 @@ pub struct SystemSnapshot {
     pub cpu_cores: Vec<CpuCoreSample>,
     pub cpu_info: CpuInfoSample,
     pub memory: MemorySample,
+    pub memory_info: MemoryInfoSample,
     pub swap: MemorySample,
     pub processes: ProcessSample,
     pub network: Vec<NetworkInterfaceSample>,
@@ -987,12 +998,16 @@ fn collect_system_snapshot_from_ssh(
         "uname -m 2>/dev/null || true",
         r#"if [ -r /etc/os-release ]; then . /etc/os-release; printf '%s\n' "${PRETTY_NAME:-${NAME:-}}"; else uname -s; fi"#,
         r#"ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true"#,
+        r#"if [ -r /sys/firmware/devicetree/base/model ]; then tr -d '\000' < /sys/firmware/devicetree/base/model; printf '\n'; elif [ -r /proc/device-tree/model ]; then tr -d '\000' < /proc/device-tree/model; printf '\n'; else true; fi"#,
         "printf '__JOYSHELL_STAT__\\n'",
         "cat /proc/stat",
         "printf '__JOYSHELL_CPUINFO__\\n'",
         "cat /proc/cpuinfo 2>/dev/null || true",
+        r#"for f in /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq; do if [ -r "$f" ]; then awk '{printf "cpu MHz\t: %.3f\n", $1/1000}' "$f"; break; fi; done"#,
         "printf '__JOYSHELL_MEMINFO__\\n'",
         "cat /proc/meminfo",
+        "printf '__JOYSHELL_MEM_DMI__\\n'",
+        r#"if command -v dmidecode >/dev/null 2>&1; then dmidecode -t memory 2>/dev/null | awk -F: '/^[[:space:]]*Configured Memory Speed:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); if($2 !~ /Unknown|Not Installed/ && $2 != "") print $2} /^[[:space:]]*Speed:/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); if($2 !~ /Unknown|Not Installed/ && $2 != "") print $2}' | head -n 8; fi"#,
         "printf '__JOYSHELL_LOADAVG__\\n'",
         "cat /proc/loadavg",
         "printf '__JOYSHELL_UPTIME__\\n'",
@@ -1239,6 +1254,8 @@ fn download_sftp_file_from_ssh(
                 }
 
                 let mut buffer = [0_u8; SFTP_TRANSFER_BUFFER_SIZE];
+                let mut last_progress_emit_at = Instant::now();
+                let mut last_progress_emit_bytes = progress.bytes_done;
                 loop {
                     if manager.is_transfer_cancelled(transfer_id) {
                         progress.status = TransferStatus::Cancelled;
@@ -1251,7 +1268,12 @@ fn download_sftp_file_from_ssh(
                     }
                     local.write_all(&buffer[..read])?;
                     progress.bytes_done += read as u64;
-                    emit_sftp_progress(manager, &progress);
+                    maybe_emit_sftp_progress(
+                        manager,
+                        &progress,
+                        &mut last_progress_emit_at,
+                        &mut last_progress_emit_bytes,
+                    );
                 }
                 progress.status = TransferStatus::Completed;
                 emit_sftp_progress(manager, &progress);
@@ -1385,6 +1407,8 @@ fn upload_sftp_file_from_ssh(
                 }
 
                 let mut buffer = [0_u8; SFTP_TRANSFER_BUFFER_SIZE];
+                let mut last_progress_emit_at = Instant::now();
+                let mut last_progress_emit_bytes = progress.bytes_done;
                 loop {
                     if manager.is_transfer_cancelled(transfer_id) {
                         progress.status = TransferStatus::Cancelled;
@@ -1397,7 +1421,12 @@ fn upload_sftp_file_from_ssh(
                     }
                     remote.write_all(&buffer[..read])?;
                     progress.bytes_done += read as u64;
-                    emit_sftp_progress(manager, &progress);
+                    maybe_emit_sftp_progress(
+                        manager,
+                        &progress,
+                        &mut last_progress_emit_at,
+                        &mut last_progress_emit_bytes,
+                    );
                 }
                 progress.status = TransferStatus::Completed;
                 emit_sftp_progress(manager, &progress);
@@ -1447,6 +1476,25 @@ fn emit_sftp_progress(manager: &SessionManager, progress: &SftpProgress) {
     let _ = manager
         .events
         .send(SessionEvent::SftpProgress(progress.clone()));
+}
+
+fn maybe_emit_sftp_progress(
+    manager: &SessionManager,
+    progress: &SftpProgress,
+    last_emit_at: &mut Instant,
+    last_emit_bytes: &mut u64,
+) {
+    let now = Instant::now();
+    let bytes_delta = progress.bytes_done.saturating_sub(*last_emit_bytes);
+    if bytes_delta < SFTP_PROGRESS_MIN_BYTES
+        && now.duration_since(*last_emit_at) < Duration::from_millis(SFTP_PROGRESS_MIN_INTERVAL_MS)
+    {
+        return;
+    }
+
+    emit_sftp_progress(manager, progress);
+    *last_emit_at = now;
+    *last_emit_bytes = progress.bytes_done;
 }
 
 fn progress_total_for_remote_path(session: &ssh2::Session, remote_path: &str) -> Option<u64> {
@@ -1578,7 +1626,8 @@ fn parse_system_snapshot(output: &str) -> anyhow::Result<SystemSnapshot> {
     let host = section_after(output, "__JOYSHELL_HOST__", "__JOYSHELL_STAT__")?;
     let stat = section_after(output, "__JOYSHELL_STAT__", "__JOYSHELL_CPUINFO__")?;
     let cpuinfo = section_after(output, "__JOYSHELL_CPUINFO__", "__JOYSHELL_MEMINFO__")?;
-    let meminfo = section_after(output, "__JOYSHELL_MEMINFO__", "__JOYSHELL_LOADAVG__")?;
+    let meminfo = section_after(output, "__JOYSHELL_MEMINFO__", "__JOYSHELL_MEM_DMI__")?;
+    let mem_dmi = section_after(output, "__JOYSHELL_MEM_DMI__", "__JOYSHELL_LOADAVG__")?;
     let loadavg = section_after(output, "__JOYSHELL_LOADAVG__", "__JOYSHELL_UPTIME__")?;
     let uptime = section_after(output, "__JOYSHELL_UPTIME__", "__JOYSHELL_PROCESSES__")?;
     let processes = section_after(output, "__JOYSHELL_PROCESSES__", "__JOYSHELL_NETDEV__")?;
@@ -1599,6 +1648,7 @@ fn parse_system_snapshot(output: &str) -> anyhow::Result<SystemSnapshot> {
         cpu_cores: parse_cpu_core_times(stat),
         cpu_info: parse_cpuinfo(cpuinfo, stat),
         memory: parse_memory(meminfo),
+        memory_info: parse_memory_info(mem_dmi),
         swap: parse_swap(meminfo),
         processes: parse_processes(processes),
         network: parse_netdev(netdev, ipaddr),
@@ -1629,6 +1679,11 @@ fn parse_host_info(host: &str) -> HostInfoSample {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let device_model = lines
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     HostInfoSample {
         hostname,
@@ -1637,6 +1692,7 @@ fn parse_host_info(host: &str) -> HostInfoSample {
         kernel_release,
         architecture,
         primary_ip,
+        device_model,
     }
 }
 
@@ -1689,6 +1745,7 @@ fn parse_cpu_core_times(stat: &str) -> Vec<CpuCoreSample> {
 
 fn parse_cpuinfo(cpuinfo: &str, stat: &str) -> CpuInfoSample {
     let mut model_name = String::new();
+    let mut raw_part = None;
     let mut logical_cores = 0_u64;
     let mut physical_cores = None;
     let mut mhz = None;
@@ -1705,7 +1762,13 @@ fn parse_cpuinfo(cpuinfo: &str, stat: &str) -> CpuInfoSample {
                 model_name = value.to_string();
             }
             "cpu part" if model_name.is_empty() => {
-                model_name = format!("ARM CPU part {value}");
+                raw_part = Some(value.to_string());
+                model_name = arm_cpu_part_name(value)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("ARM CPU part {value}"));
+            }
+            "cpu part" if raw_part.is_none() => {
+                raw_part = Some(value.to_string());
             }
             "cpu cores" if physical_cores.is_none() => {
                 physical_cores = value.parse::<u64>().ok();
@@ -1726,9 +1789,61 @@ fn parse_cpuinfo(cpuinfo: &str, stat: &str) -> CpuInfoSample {
 
     CpuInfoSample {
         model_name,
+        raw_part,
         logical_cores,
         physical_cores,
         mhz,
+    }
+}
+
+fn arm_cpu_part_name(part: &str) -> Option<&'static str> {
+    let normalized = part.trim().trim_start_matches("0x").to_ascii_lowercase();
+    match normalized.as_str() {
+        "920" => Some("ARM920"),
+        "926" => Some("ARM926"),
+        "b02" => Some("Cortex-A5"),
+        "b36" => Some("Cortex-A5"),
+        "b76" => Some("Cortex-A7"),
+        "c05" => Some("Cortex-A5"),
+        "c07" => Some("Cortex-A7"),
+        "c08" => Some("Cortex-A8"),
+        "c09" => Some("Cortex-A9"),
+        "c0d" => Some("Cortex-A17"),
+        "c0e" => Some("Cortex-A17"),
+        "d01" => Some("Cortex-A32"),
+        "d03" => Some("Cortex-A53"),
+        "d04" => Some("Cortex-A35"),
+        "d05" => Some("Cortex-A55"),
+        "d06" => Some("Cortex-A65"),
+        "d07" => Some("Cortex-A57"),
+        "d08" => Some("Cortex-A72"),
+        "d09" => Some("Cortex-A73"),
+        "d0a" => Some("Cortex-A75"),
+        "d0b" => Some("Cortex-A76"),
+        "d0c" => Some("Neoverse N1"),
+        "d0d" => Some("Cortex-A77"),
+        "d0e" => Some("Cortex-A76AE"),
+        "d13" => Some("Cortex-R52"),
+        "d20" => Some("Cortex-M23"),
+        "d21" => Some("Cortex-M33"),
+        "d40" => Some("Neoverse V1"),
+        "d41" => Some("Cortex-A78"),
+        "d42" => Some("Cortex-A78AE"),
+        "d44" => Some("Cortex-X1"),
+        "d46" => Some("Cortex-A510"),
+        "d47" => Some("Cortex-A710"),
+        "d48" => Some("Cortex-X2"),
+        "d49" => Some("Neoverse N2"),
+        "d4a" => Some("Neoverse E1"),
+        "d4b" => Some("Cortex-A78C"),
+        "d4c" => Some("Cortex-X1C"),
+        "d4d" => Some("Cortex-A715"),
+        "d4e" => Some("Cortex-X3"),
+        "d4f" => Some("Neoverse V2"),
+        "d80" => Some("Cortex-A520"),
+        "d81" => Some("Cortex-A720"),
+        "d82" => Some("Cortex-X4"),
+        _ => None,
     }
 }
 
@@ -1792,6 +1907,38 @@ fn parse_memory(meminfo: &str) -> MemorySample {
         used_bytes: total.saturating_sub(available),
         free_bytes: free,
         available_bytes: available,
+    }
+}
+
+fn parse_memory_info(mem_dmi: &str) -> MemoryInfoSample {
+    let mut speeds = mem_dmi
+        .lines()
+        .filter_map(parse_memory_speed_mhz)
+        .filter(|value| *value > 0.0)
+        .collect::<Vec<_>>();
+    speeds.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    speeds.dedup_by(|left, right| (*left - *right).abs() < 0.5);
+    let frequency_mhz = speeds.first().copied();
+    MemoryInfoSample { frequency_mhz }
+}
+
+fn parse_memory_speed_mhz(line: &str) -> Option<f64> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("unknown") || lower.contains("not installed") {
+        return None;
+    }
+    let value = line
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())?;
+    if value > 0.0 {
+        Some(value)
+    } else {
+        None
     }
 }
 
@@ -2190,4 +2337,29 @@ fn is_transient_ssh_io_error(error: &std::io::Error) -> bool {
         || message.contains("transport read")
         || message.contains("transport write")
         || message.contains("draining incoming flow")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_arm_cpu_part_to_readable_core_name() {
+        let cpuinfo = "\
+processor   : 0
+CPU implementer : 0x41
+CPU architecture: 8
+CPU part    : 0xd03
+CPU revision    : 4
+processor   : 1
+CPU part    : 0xd03
+";
+        let stat = "cpu  100 0 50 1000 0 0 0 0 0 0\ncpu0 50 0 25 500 0 0 0 0 0 0\ncpu1 50 0 25 500 0 0 0 0 0 0";
+
+        let parsed = parse_cpuinfo(cpuinfo, stat);
+
+        assert_eq!(parsed.model_name, "Cortex-A53");
+        assert_eq!(parsed.raw_part.as_deref(), Some("0xd03"));
+        assert_eq!(parsed.logical_cores, 2);
+    }
 }

@@ -7,6 +7,30 @@ export type SessionProfile = {
   username: string;
   tags: string[];
   favorite: boolean;
+  sort_order: number;
+};
+
+export type SessionFolder = {
+  id: string;
+  name: string;
+  parent_id?: string | null;
+};
+
+export type CommandSnippet = {
+  id: string;
+  title: string;
+  command: string;
+  tags: string[];
+};
+
+export type LayoutSettings = {
+  restore_last_layout: boolean;
+  default_left_sidebar_open: boolean;
+  default_right_sidebar_open: boolean;
+  default_bottom_panel_open: boolean;
+  last_left_sidebar_open: boolean;
+  last_right_sidebar_open: boolean;
+  last_bottom_panel_open: boolean;
 };
 
 export type SessionInfo = {
@@ -123,6 +147,7 @@ export type CpuCoreSample = {
 
 export type CpuInfoSample = {
   model_name: string;
+  raw_part?: string | null;
   logical_cores: number;
   physical_cores?: number | null;
   mhz?: number | null;
@@ -133,6 +158,10 @@ export type MemorySample = {
   used_bytes: number;
   free_bytes: number;
   available_bytes: number;
+};
+
+export type MemoryInfoSample = {
+  frequency_mhz?: number | null;
 };
 
 export type NetworkInterfaceSample = {
@@ -167,6 +196,7 @@ export type HostInfoSample = {
   kernel_release: string;
   architecture: string;
   primary_ip?: string | null;
+  device_model?: string | null;
 };
 
 export type ProcessSample = {
@@ -187,6 +217,7 @@ export type SystemSnapshot = {
   cpu_cores: CpuCoreSample[];
   cpu_info: CpuInfoSample;
   memory: MemorySample;
+  memory_info: MemoryInfoSample;
   swap: MemorySample;
   processes: ProcessSample;
   network: NetworkInterfaceSample[];

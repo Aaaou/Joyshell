@@ -72,3 +72,34 @@ Later optimization should add a dedicated SFTP worker per connected profile:
 - pause/resume/cancel backed by queue state,
 - reconnect-and-resume after side session loss,
 - credential-provider based re-authentication.
+
+## Transfer Speed Notes
+
+Observed SFTP speed can drop for three different reasons:
+
+- protocol throughput: a sequential SFTP loop waits for each read/write path to progress instead of keeping many requests in flight;
+- UI pressure: emitting a progress event for every small chunk can make the frontend and Tauri event bridge busy;
+- connection churn: opening a fresh side SSH session for every operation adds handshake/auth overhead and prevents reuse of an already warm SFTP subsystem.
+
+Reference behavior:
+
+- OpenSSH `sftp` exposes `-B buffer_size` and `-R num_requests`; its manual states that larger buffers reduce round trips and that the default is `64` outstanding requests for concurrent SFTP operations.
+- WinSCP exposes endurance settings for automatic resume/reconnect and distinguishes foreground sessions from background transfers.
+- FileZilla uses a transfer queue model rather than tying file transfer progress to a single interactive shell loop.
+
+Current Joyshell mitigation:
+
+- SFTP transfer buffer increased from `64 KiB` to `128 KiB`.
+- Frontend progress events are throttled to at most every `120ms` or every `1 MiB` of transferred data.
+- Terminal and SFTP are still isolated through side SSH sessions.
+- Transfer speed display uses a smoothed instantaneous rate when enough sample time has elapsed.
+- If progress events arrive too quickly to form a stable sample window, the UI falls back to average rate from `bytes_done / elapsed_time` so high-speed transfers do not show `0 B/s` and unknown ETA.
+- The rate sample baseline is not advanced until the sample window is large enough, preventing fast devices from repeatedly discarding useful byte deltas.
+
+Next-stage speed work:
+
+- persistent per-profile SFTP worker,
+- global and per-host transfer concurrency limits,
+- pipelined read/write requests where the SSH/SFTP library supports it,
+- optional bandwidth limiter,
+- adaptive progress refresh rate based on file size and measured throughput.
