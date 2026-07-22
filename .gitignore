@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+.tauri/
+.vite/
+*.log
+*.local
+apps/desktop/src-tauri/target/

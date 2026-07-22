@@ -1,0 +1,13 @@
+[package]
+name = "joyshell-store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+joyshell-core = { path = "../joyshell-core" }

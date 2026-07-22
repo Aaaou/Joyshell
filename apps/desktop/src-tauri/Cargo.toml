@@ -1,0 +1,25 @@
+[package]
+name = "joyshell-desktop"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "joyshell_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio.workspace = true
+uuid.workspace = true
+joyshell-agent = { path = "../../../crates/joyshell-agent" }
+joyshell-core = { path = "../../../crates/joyshell-core" }
+joyshell-store = { path = "../../../crates/joyshell-store" }

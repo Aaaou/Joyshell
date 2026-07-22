@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Joyshell",
+  "version": "0.1.0",
+  "identifier": "dev.joyshell.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Joyshell",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 980,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg", "deb", "appimage"],
+    "category": "DeveloperTool",
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "resources/windows/openssl/*.dll": "resources/windows/openssl/"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/openssl-dlls.nsh"
+      }
+    },
+    "shortDescription": "Cross-platform SSH workspace with guarded assistants",
+    "longDescription": "Joyshell is a cross-platform SSH workspace with terminal, SFTP, themes, and a guarded assistant system."
+  }
+}

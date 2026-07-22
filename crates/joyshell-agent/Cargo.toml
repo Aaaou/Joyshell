@@ -1,0 +1,15 @@
+[package]
+name = "joyshell-agent"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+joyshell-core = { path = "../joyshell-core" }
+joyshell-store = { path = "../joyshell-store" }
