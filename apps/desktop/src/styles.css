@@ -70,6 +70,8 @@
   --workspace-corner-radius: 20px;
   --chrome-bg-x: 0px;
   --chrome-bg-y: 0px;
+  --chrome-bg-width: max(100vw, 1200px);
+  --chrome-bg-height: 920px;
   --left-chrome-background:
     radial-gradient(circle at var(--sidebar-glow-x, 28%) var(--sidebar-glow-y, 20%), hsla(var(--sidebar-top-hue, 226), 80%, 86%, var(--sidebar-glow-opacity, 0.34)), transparent 39%),
     radial-gradient(circle at calc(100% - var(--sidebar-glow-x, 28%)) calc(100% - var(--sidebar-glow-y, 20%)), hsla(var(--sidebar-bottom-hue, 24), 72%, 83%, 0.22), transparent 42%),
@@ -156,7 +158,9 @@ button {
   overflow: hidden;
   background: var(--left-chrome-background);
   background-position: var(--chrome-bg-x) var(--chrome-bg-y);
-  background-size: max(100vw, 1200px) max(100vh, 760px);
+  background-repeat: no-repeat;
+  background-size: var(--chrome-bg-width) var(--chrome-bg-height);
+  background-color: hsl(var(--sidebar-bottom-hue, 24), 70%, var(--sidebar-bottom-light, 94.2%));
   isolation: isolate;
   transition: grid-template-columns 160ms ease;
 }
@@ -458,8 +462,8 @@ button {
 }
 
 .sidebar.session-sidebar-mode {
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
+  grid-template-rows: auto 32px minmax(0, 1fr) var(--sidebar-footer-height);
+  gap: 8px;
 }
 
 .sidebar.settings-sidebar-mode {
@@ -469,15 +473,8 @@ button {
 
 .sidebar-session-shell {
   position: relative;
-  display: grid;
-  grid-template-rows: 40px minmax(0, 1fr) var(--sidebar-footer-height);
-  height: 100%;
-  min-height: 0;
-  margin: 0 -10px;
-  padding: 0 10px;
-  gap: 0;
+  display: contents;
   background: transparent;
-  overflow: hidden;
 }
 
 .sidebar-session-shell::before {
@@ -832,6 +829,10 @@ button {
   background: rgba(255, 255, 255, 0.22);
   backdrop-filter: blur(8px);
   color: var(--muted);
+}
+
+.sidebar.session-sidebar-mode .search-box {
+  margin-bottom: 0;
 }
 
 .search-box input {

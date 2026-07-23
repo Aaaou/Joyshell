@@ -98,7 +98,7 @@ type SessionEventPayload =
   | { SftpProgress: SftpProgress };
 
 const isDesktopRuntime = "__TAURI_INTERNALS__" in window;
-const clientBuildLabel = "0.1.24 chrome-unified-20260723";
+const clientBuildLabel = "0.1.25 sidebar-structure-20260724";
 const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
 
 function applySidebarPositionGradient(
@@ -292,7 +292,7 @@ export function App() {
     skip_delete_confirmations: false,
     splash_center_image_data_url: null,
     terminal_background_image_data_url: null,
-    terminal_background_opacity: 28,
+    terminal_background_opacity: 35,
     terminal_background_apply_workspace: true,
     terminal_background_apply_home: false
   });
@@ -2374,7 +2374,7 @@ export function App() {
   const terminalBackgroundImage = layoutSettings.terminal_background_image_data_url || defaultWorkspaceBackground;
   const terminalBackgroundOpacity = layoutSettings.terminal_background_image_data_url
     ? clampNumber(layoutSettings.terminal_background_opacity, 0, 100) / 100
-    : 1;
+    : 0.35;
   const hasWorkspaceBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_workspace);
   const hasHomeBackground = Boolean(terminalBackgroundImage && (layoutSettings.terminal_background_apply_home || usingDefaultTerminalBackground));
   const appCustomStyle = {

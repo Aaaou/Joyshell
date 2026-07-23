@@ -81,7 +81,7 @@ const defaultLayoutSettings: LayoutSettings = {
   skip_delete_confirmations: false,
   splash_center_image_data_url: null,
   terminal_background_image_data_url: null,
-  terminal_background_opacity: 28,
+  terminal_background_opacity: 35,
   terminal_background_apply_workspace: true,
   terminal_background_apply_home: true
 };

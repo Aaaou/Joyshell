@@ -60,7 +60,7 @@ impl Default for LayoutSettings {
             skip_delete_confirmations: false,
             splash_center_image_data_url: None,
             terminal_background_image_data_url: None,
-            terminal_background_opacity: 28,
+            terminal_background_opacity: 35,
             terminal_background_apply_workspace: true,
             terminal_background_apply_home: true,
         }
@@ -681,9 +681,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             skip_delete_confirmations integer not null default 0,
             splash_center_image_data_url text null,
             terminal_background_image_data_url text null,
-            terminal_background_opacity integer not null default 28,
+            terminal_background_opacity integer not null default 35,
             terminal_background_apply_workspace integer not null default 1,
-            terminal_background_apply_home integer not null default 0,
+            terminal_background_apply_home integer not null default 1,
             updated_at text not null default (datetime('now'))
         );
         ",
