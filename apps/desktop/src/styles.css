@@ -70,8 +70,8 @@
   --workspace-corner-radius: 20px;
   --chrome-bg-x: 0px;
   --chrome-bg-y: 0px;
-  --chrome-bg-width: max(100vw, 1200px);
-  --chrome-bg-height: max(100dvh, 920px);
+  --chrome-bg-width: max(calc(100vw + 240px), 1440px);
+  --chrome-bg-height: max(calc(100dvh + 180px), 1040px);
   --left-chrome-background:
     radial-gradient(circle at var(--sidebar-glow-x, 28%) var(--sidebar-glow-y, 20%), hsla(var(--sidebar-top-hue, 226), 80%, 86%, var(--sidebar-glow-opacity, 0.34)), transparent 39%),
     linear-gradient(
