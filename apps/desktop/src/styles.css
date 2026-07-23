@@ -1688,6 +1688,7 @@ button {
   right: 16px;
   bottom: 10px;
   left: 72px;
+  z-index: 18;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1699,6 +1700,7 @@ button {
   color: var(--text);
   font-size: 13px;
   backdrop-filter: blur(10px);
+  pointer-events: auto;
 }
 
 .command-dock input {
@@ -3265,6 +3267,109 @@ button {
 .opacity-row input[type="range"] {
   width: min(260px, 34vw);
   accent-color: var(--accent);
+}
+
+.image-crop-backdrop {
+  z-index: 88;
+}
+
+.image-crop-dialog {
+  display: flex;
+  width: min(620px, calc(100vw - 40px));
+  max-height: min(760px, calc(100vh - 40px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(31, 35, 40, 0.12);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 24px 80px rgba(31, 35, 40, 0.22);
+}
+
+.image-crop-body {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.image-crop-frame {
+  position: relative;
+  width: min(100%, 520px);
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(31, 35, 40, 0.12);
+  border-radius: 16px;
+  background:
+    linear-gradient(45deg, rgba(31, 35, 40, 0.05) 25%, transparent 25% 75%, rgba(31, 35, 40, 0.05) 75%),
+    linear-gradient(45deg, rgba(31, 35, 40, 0.05) 25%, transparent 25% 75%, rgba(31, 35, 40, 0.05) 75%),
+    #f7f9fb;
+  background-position: 0 0, 10px 10px, 0 0;
+  background-size: 20px 20px, 20px 20px, auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.image-crop-frame.splash {
+  width: min(360px, 74vw);
+  border-radius: 999px;
+}
+
+.image-crop-frame:active {
+  cursor: grabbing;
+}
+
+.image-crop-frame img {
+  position: absolute;
+  max-width: none;
+  max-height: none;
+  transform-origin: center;
+  user-select: none;
+  pointer-events: none;
+}
+
+.crop-guide-lines {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent calc(33.333% - 0.5px), rgba(255, 255, 255, 0.78) calc(33.333% - 0.5px) calc(33.333% + 0.5px), transparent calc(33.333% + 0.5px)),
+    linear-gradient(90deg, transparent calc(66.666% - 0.5px), rgba(255, 255, 255, 0.78) calc(66.666% - 0.5px) calc(66.666% + 0.5px), transparent calc(66.666% + 0.5px)),
+    linear-gradient(0deg, transparent calc(33.333% - 0.5px), rgba(255, 255, 255, 0.78) calc(33.333% - 0.5px) calc(33.333% + 0.5px), transparent calc(33.333% + 0.5px)),
+    linear-gradient(0deg, transparent calc(66.666% - 0.5px), rgba(255, 255, 255, 0.78) calc(66.666% - 0.5px) calc(66.666% + 0.5px), transparent calc(66.666% + 0.5px));
+  mix-blend-mode: difference;
+  opacity: 0.72;
+}
+
+.crop-circle-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  border-radius: 999px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.82),
+    inset 0 0 0 999px rgba(255, 255, 255, 0.02);
+}
+
+.crop-zoom-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.crop-zoom-row input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.crop-hint {
+  margin: 0;
+  color: var(--muted-soft);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .ssh-dialog {
