@@ -766,7 +766,8 @@ export function App() {
   }, [activeSession?.id, syncTerminalTail]);
 
   useEffect(() => {
-    if (!activeProfile?.host || !activeProfile.port) {
+    const target = resolveLatencyTarget(activeProfile);
+    if (!target) {
       setLatencyMs(null);
       setLatencyStatus("待连接");
       return;
@@ -777,8 +778,8 @@ export function App() {
       setLatencyStatus("测量中");
       try {
         const value = await measureLatency(
-          activeProfile.host,
-          activeProfile.port,
+          target.host,
+          target.port,
           layoutSettings.use_icmp_latency_probe
         );
         if (cancelled) {
@@ -803,7 +804,13 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeProfile?.host, activeProfile?.port, layoutSettings.use_icmp_latency_probe]);
+  }, [
+    activeProfile?.host,
+    activeProfile?.port,
+    activeProfile?.latency_probe_host,
+    activeProfile?.latency_probe_port,
+    layoutSettings.use_icmp_latency_probe
+  ]);
 
   const flash = useCallback((message: string) => {
     setNotice(message);
@@ -3448,11 +3455,22 @@ function createBlankProfile(name = "新建服务器", group: string | null = nul
     group,
     host: "",
     port: 22,
+    latency_probe_host: null,
+    latency_probe_port: null,
     username: "",
     tags: [],
     favorite: false,
     sort_order: 0
   };
+}
+
+function resolveLatencyTarget(profile: SessionProfile | undefined) {
+  if (!profile?.host || !profile.port) {
+    return null;
+  }
+  const host = profile.latency_probe_host?.trim() || profile.host;
+  const port = profile.latency_probe_port || profile.port;
+  return { host, port };
 }
 
 function createUniqueBlankProfile(profiles: SessionProfile[], group: string | null = null): SessionProfile {
@@ -4332,8 +4350,8 @@ function AppSettingsDialog({
                 <strong>网络</strong>
                 <label className="settings-toggle-row">
                   <span>
-                    <b>使用真实网络时延</b>
-                    <small>关闭时测 SSH 主机和端口；开启后使用 ICMP/ping 测主机回应。</small>
+                    <b>使用 ICMP 探测</b>
+                    <small>关闭时测 TCP 端口连通时延；开启后 ping 服务器配置里的时延主机。</small>
                   </span>
                   <input
                     type="checkbox"
@@ -4440,7 +4458,7 @@ function SshSettingsDialog({
   const [tagsText, setTagsText] = useState(profile.tags.join(", "));
   const [error, setError] = useState<string | null>(null);
 
-  const update = (key: keyof SessionProfile, value: string | number) => {
+  const update = (key: keyof SessionProfile, value: string | number | null) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
@@ -4543,6 +4561,28 @@ function SshSettingsDialog({
 
             <fieldset>
               <legend>高级</legend>
+              <label>
+                <span>时延主机:</span>
+                <input
+                  value={draft.latency_probe_host ?? ""}
+                  onChange={(event) => update("latency_probe_host", event.target.value)}
+                  placeholder="留空则使用 SSH 主机；隧道可填真实域名/IP"
+                />
+              </label>
+              <label>
+                <span>时延端口:</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={draft.latency_probe_port ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value.trim();
+                    update("latency_probe_port", value ? Number(value) : null);
+                  }}
+                  placeholder="留空则使用 SSH 端口"
+                />
+              </label>
               <label className="check-row">
                 <input type="checkbox" disabled />
                 <span>跳板机 / 代理链预留</span>
@@ -4568,6 +4608,10 @@ function SshSettingsDialog({
                 setError("端口必须在 1 到 65535 之间");
                 return;
               }
+              if (draft.latency_probe_port && (draft.latency_probe_port < 1 || draft.latency_probe_port > 65535)) {
+                setError("时延端口必须在 1 到 65535 之间");
+                return;
+              }
               if (authMethod !== "password") {
                 setError("初版后端当前只接入密码认证，请先选择密码方式");
                 return;
@@ -4576,6 +4620,8 @@ function SshSettingsDialog({
                 ...draft,
                 name: draft.name.trim(),
                 host: draft.host.trim(),
+                latency_probe_host: draft.latency_probe_host?.trim() || null,
+                latency_probe_port: draft.latency_probe_port || null,
                 username: draft.username.trim(),
                 group: draft.group?.trim() || null,
                 tags: tagsText

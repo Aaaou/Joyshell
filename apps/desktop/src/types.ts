@@ -4,6 +4,8 @@ export type SessionProfile = {
   group?: string | null;
   host: string;
   port: number;
+  latency_probe_host?: string | null;
+  latency_probe_port?: number | null;
   username: string;
   tags: string[];
   favorite: boolean;

@@ -17,6 +17,8 @@ async fn main() -> anyhow::Result<()> {
         group: Some("probe".to_string()),
         host,
         port,
+        latency_probe_host: None,
+        latency_probe_port: None,
         username,
         auth_method: AuthMethod::Password {
             secret_ref: "env://JOYSHELL_SSH_PASSWORD".to_string(),

@@ -16,11 +16,17 @@ use std::collections::HashMap;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Clone)]
 struct AppState {
@@ -348,20 +354,11 @@ fn measure_tcp_latency_ms(host: &str, port: u16) -> Option<f64> {
 fn measure_icmp_latency_ms(host: &str) -> Option<f64> {
     let started = Instant::now();
     let output = if cfg!(target_os = "windows") {
-        Command::new("ping")
-            .args(["-n", "1", "-w", "1500", host])
-            .output()
-            .ok()?
+        run_probe_command("ping", &["-n", "1", "-w", "1500", host])?
     } else if cfg!(target_os = "macos") {
-        Command::new("ping")
-            .args(["-c", "1", "-W", "1500", host])
-            .output()
-            .ok()?
+        run_probe_command("ping", &["-c", "1", "-W", "1500", host])?
     } else {
-        Command::new("ping")
-            .args(["-c", "1", "-W", "2", host])
-            .output()
-            .ok()?
+        run_probe_command("ping", &["-c", "1", "-W", "2", host])?
     };
     if !output.status.success() {
         return None;
@@ -372,6 +369,14 @@ fn measure_icmp_latency_ms(host: &str) -> Option<f64> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_ping_latency_ms(&text).or_else(|| Some(started.elapsed().as_secs_f64() * 1000.0))
+}
+
+fn run_probe_command(program: &str, args: &[&str]) -> Option<Output> {
+    let mut command = Command::new(program);
+    command.args(args);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.output().ok()
 }
 
 fn parse_ping_latency_ms(output: &str) -> Option<f64> {
