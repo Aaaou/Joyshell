@@ -51,7 +51,21 @@ const demoProfiles: SessionProfile[] = previewDragTest
         tags: ["linux"],
         favorite: false,
         sort_order: 1
-      }
+      },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        id: `preview-profile-extra-${index}`,
+        name: `新建服务器${index + 1}`,
+        group: index < 2 ? "项目 Alpha" : null,
+        host: `192.168.110.${index + 20}`,
+        port: 22,
+        latency_probe_host: null,
+        latency_probe_port: null,
+        use_terminal_latency_probe: false,
+        username: index % 2 === 0 ? "root" : "admin",
+        tags: ["ssh"],
+        favorite: false,
+        sort_order: index + 2
+      }))
     ]
   : [];
 const demoCommands: CommandSnippet[] = [];

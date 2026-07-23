@@ -22,7 +22,7 @@
 
 :root {
   color: #1f2328;
-  background: #ffffff;
+  background: #f6f7fb;
   --joy-ui-font: "Alimama FangYuanTi", "阿里妈妈方圆体", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-family: var(--joy-ui-font);
   --surface: #ffffff;
@@ -43,6 +43,7 @@
   --success: #1f9d55;
   --warning: #c58515;
   --danger: #d83b3b;
+  --window-resize-bg: #f6f7fb;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -64,7 +65,9 @@
   --left-chrome-width: 238px;
   --sidebar-rail-width: 238px;
   --titlebar-left-width: 238px;
+  --sidebar-footer-height: 36px;
   --chrome-left-clip-width: var(--left-chrome-width);
+  --workspace-corner-radius: 20px;
   --chrome-bg-x: 0px;
   --chrome-bg-y: 0px;
   --left-chrome-background:
@@ -110,7 +113,10 @@
 
 html,
 body {
+  width: 100%;
+  height: 100%;
   font-family: var(--joy-ui-font);
+  background: var(--window-resize-bg);
 }
 
 body {
@@ -118,6 +124,13 @@ body {
   min-width: 1100px;
   min-height: 100vh;
   overflow: hidden;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+  background: var(--window-resize-bg);
 }
 
 #root,
@@ -138,7 +151,8 @@ button {
   display: grid;
   grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 360px;
   grid-template-rows: 38px minmax(0, 1fr);
-  height: 100vh;
+  height: 100dvh;
+  min-height: 100vh;
   overflow: hidden;
   background: var(--left-chrome-background);
   background-position: var(--chrome-bg-x) var(--chrome-bg-y);
@@ -464,14 +478,64 @@ button {
   z-index: 1;
   grid-column: 1;
   grid-row: 2;
-  display: flex;
+  display: grid;
   min-height: 0;
-  flex-direction: column;
-  gap: 12px;
-  padding: 8px 10px 7px;
+  padding: 8px 10px 0;
   border-right: 0;
   background: transparent;
   pointer-events: auto;
+}
+
+.sidebar::before {
+  display: none;
+  content: none;
+}
+
+.sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+.sidebar.settings-sidebar-mode {
+  padding-bottom: 7px;
+}
+
+.sidebar.session-sidebar-mode {
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.sidebar.settings-sidebar-mode {
+  grid-template-rows: auto minmax(0, 1fr) 40px;
+  gap: 8px;
+}
+
+.sidebar-session-shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: 40px minmax(0, 1fr) var(--sidebar-footer-height);
+  height: 100%;
+  min-height: 0;
+  margin: 0 -10px;
+  padding: 0 10px;
+  gap: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.sidebar-session-shell::before {
+  position: absolute;
+  inset: 40px 0 var(--sidebar-footer-height) 0;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-session-shell > * {
+  position: relative;
+  z-index: 1;
 }
 
 .sidebar.collapsed {
@@ -507,7 +571,6 @@ button {
 
 .settings-sidebar-list {
   display: flex;
-  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   gap: 6px;
@@ -810,6 +873,7 @@ button {
   align-items: center;
   gap: 8px;
   height: 32px;
+  margin-bottom: 8px;
   padding: 0 9px;
   border: 0;
   border-radius: var(--radius-md);
@@ -828,13 +892,16 @@ button {
 
 .nav-section {
   display: flex;
-  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   gap: 4px;
+  margin-bottom: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 2px;
+  padding-bottom: 8px;
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 
 .nav-section.compact {
@@ -845,20 +912,23 @@ button {
 
 .sidebar-footer {
   position: relative;
-  isolation: isolate;
+  z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 26px;
   align-items: center;
-  flex: 0 0 auto;
   gap: 8px;
-  margin-top: auto;
+  margin-top: 0;
   width: 100%;
-  min-height: 28px;
-  padding: 2px 10px 0;
-  border-top: 1px solid rgba(31, 35, 40, 0.08);
+  height: var(--sidebar-footer-height);
+  min-height: var(--sidebar-footer-height);
+  padding: 0 0;
+  border-top: 1px solid rgba(31, 35, 40, 0.1);
   border-radius: 0;
-  background: transparent;
+  background: transparent !important;
   box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  isolation: auto;
 }
 
 .sidebar-footer::before {
@@ -891,16 +961,18 @@ button {
 .app-settings-button.update {
   width: 24px;
   border-radius: 999px;
-  background: var(--accent);
-  color: #ffffff;
+  background: transparent;
+  color: var(--text);
 }
 
 .app-settings-button:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: transparent;
+  color: var(--accent);
 }
 
 .app-settings-button.update:hover {
-  background: #0f6ae8;
+  background: transparent;
+  color: var(--accent);
 }
 
 .nav-section.compact button,
@@ -924,6 +996,7 @@ button {
 
 .session-row {
   padding: 6px 8px;
+  overflow: hidden;
   user-select: none;
   transition:
     transform 150ms ease,
@@ -1213,7 +1286,7 @@ button {
   flex-direction: column;
   padding: 0;
   background: transparent;
-  border-radius: 0;
+  border-radius: var(--workspace-corner-radius) 0 0 0;
   overflow: hidden;
 }
 
@@ -1467,7 +1540,7 @@ button {
 }
 
 .app-shell:not(.home-mode).has-workspace-bg .terminal-region::before,
-.app-shell.home-mode.has-home-bg::after {
+.app-shell.home-mode.has-home-bg .terminal-region::before {
   position: absolute;
   inset: 0;
   z-index: 0;
@@ -1479,12 +1552,8 @@ button {
   opacity: var(--joy-custom-background-opacity, 0.28);
 }
 
-.app-shell.home-mode.has-home-bg::after {
-  z-index: 0;
-}
-
 .app-shell:not(.home-mode).has-workspace-bg .terminal-region,
-.app-shell.home-mode.has-home-bg {
+.app-shell.home-mode.has-home-bg .terminal-region {
   isolation: isolate;
 }
 
@@ -1634,25 +1703,20 @@ button {
 }
 
 .profile-orbit-item:hover .profile-orbit-icon,
-.profile-orbit-item:focus-visible .profile-orbit-icon,
-.profile-orbit-item.selected .profile-orbit-icon {
+.profile-orbit-item:focus-visible .profile-orbit-icon {
   transform: translateY(-4px);
   box-shadow:
     inset 0 0 0 1px rgba(22, 119, 255, 0.2),
     0 16px 34px rgba(31, 35, 40, 0.11);
 }
 
+.profile-orbit-item.selected .profile-orbit-icon {
+  transform: translateY(-4px);
+}
+
 .profile-orbit-item.selected::before {
-  position: absolute;
-  top: -8px;
-  left: 50%;
-  z-index: -1;
-  width: 82px;
-  height: 82px;
-  border-radius: 24px;
-  content: "";
-  background: rgba(22, 119, 255, 0.08);
-  transform: translateX(-50%);
+  display: none;
+  content: none;
 }
 
 .profile-orbit-item small {
@@ -1732,6 +1796,21 @@ button {
   pointer-events: auto;
 }
 
+.terminal-region.file-panel-closed .command-dock {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 38px;
+  padding: 0 16px;
+  background: var(--terminal-bg);
+  box-shadow: none;
+}
+
+.app-shell.has-workspace-bg .terminal-region.file-panel-closed .command-dock,
+.app-shell.has-home-bg .terminal-region.file-panel-closed .command-dock {
+  background: transparent;
+}
+
 .command-dock input {
   min-width: 0;
   flex: 1;
@@ -1785,6 +1864,11 @@ button {
   background: rgba(22, 119, 255, 0.08);
 }
 
+.terminal-region.file-panel-closed .command-tools button,
+.terminal-region.file-panel-closed .command-tools .connect-dock-button {
+  background: transparent;
+}
+
 .input-meter {
   color: var(--text);
   font-size: 11px;
@@ -1799,7 +1883,7 @@ button {
   flex-direction: column;
   border-right: 0;
   border-bottom: 0;
-  background: transparent;
+  background: var(--surface);
 }
 
 .file-region.drop-active {
@@ -1814,7 +1898,7 @@ button {
   min-height: 34px;
   padding: 4px 8px;
   border-bottom: 0;
-  background: transparent;
+  background: var(--surface);
 }
 
 .file-tab {
@@ -2298,6 +2382,7 @@ button {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
+  background: var(--surface);
 }
 
 .file-tree {
@@ -2340,6 +2425,7 @@ button {
 .file-table {
   min-width: 0;
   overflow: auto;
+  background: var(--surface);
 }
 
 .table-empty {
@@ -3068,6 +3154,88 @@ button {
   background: #b92f38;
 }
 
+.text-input-backdrop {
+  z-index: 82;
+}
+
+.text-input-dialog {
+  width: min(440px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid rgba(31, 35, 40, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 24px 70px rgba(31, 35, 40, 0.22);
+}
+
+.text-input-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(22, 119, 255, 0.1);
+  color: var(--accent);
+}
+
+.text-input-body {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px 16px;
+}
+
+.text-input-body p {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.text-input-body label {
+  display: grid;
+  gap: 8px;
+}
+
+.text-input-body label span {
+  color: var(--muted-soft);
+  font-size: 12px;
+}
+
+.text-input-body input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(31, 35, 40, 0.14);
+  border-radius: 10px;
+  outline: none;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.text-input-body input:focus {
+  border-color: rgba(22, 119, 255, 0.5);
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+}
+
+.text-input-actions .primary-confirm-button {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.text-input-actions .primary-confirm-button:hover:not(:disabled) {
+  background: #0f6ae8;
+}
+
+.text-input-actions .primary-confirm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .app-settings-backdrop {
   align-items: stretch;
   justify-items: start;
@@ -3185,6 +3353,41 @@ button {
   background: rgba(255, 255, 255, 0.34);
   box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.035);
   backdrop-filter: blur(8px);
+}
+
+.general-settings-page {
+  grid-template-columns: minmax(0, 720px);
+  align-content: start;
+  justify-content: start;
+  gap: 12px;
+}
+
+.general-settings-page section {
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+}
+
+.general-settings-page section > strong {
+  font-size: 13px;
+}
+
+.general-settings-page section:first-child {
+  grid-column: auto;
+}
+
+.general-settings-page .settings-toggle-row {
+  min-height: 46px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.045);
+}
+
+.general-settings-page .settings-toggle-row small {
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .settings-toggle-row {
@@ -3651,7 +3854,11 @@ button {
 
   .app-shell,
   .app-shell.assistant-open {
-    grid-template-columns: 220px minmax(0, 1fr) 48px;
+    --left-chrome-width: 220px;
+    --sidebar-rail-width: 220px;
+    --titlebar-left-width: 220px;
+    --chrome-left-clip-width: 220px;
+    grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 48px;
   }
 
   .app-shell.sidebar-collapsed,
@@ -3670,5 +3877,9 @@ button {
   .drawer-content {
     pointer-events: none;
     opacity: 0;
+  }
+
+  .general-settings-page {
+    grid-template-columns: 1fr;
   }
 }

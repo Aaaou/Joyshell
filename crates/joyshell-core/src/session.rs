@@ -427,6 +427,7 @@ impl SessionManager {
             .ok_or(SessionError::NotFound(session_id))?;
         runtime.info.state = ConnectionState::Disconnected;
         runtime.info.last_seen_at = Utc::now();
+        runtime.ssh = None;
         let _ = self.events.send(SessionEvent::StateChanged {
             session_id,
             state: ConnectionState::Disconnected,
@@ -496,7 +497,7 @@ impl SessionManager {
             receiver
         };
 
-        match tokio::time::timeout(Duration::from_millis(1500), receiver).await {
+        match tokio::time::timeout(Duration::from_millis(3000), receiver).await {
             Ok(Ok(result)) => result.map_err(SessionError::ConnectionFailed),
             Ok(Err(_)) => Err(SessionError::ConnectionFailed(
                 "terminal latency probe was cancelled".to_string(),
@@ -1035,7 +1036,7 @@ fn measure_channel_roundtrip_ms(
     socket_waiter: &mut SocketWaiter,
 ) -> Result<Option<f64>, String> {
     let started = Instant::now();
-    let timeout = Duration::from_millis(1500);
+    let timeout = Duration::from_millis(3000);
 
     loop {
         match channel.request_pty_size(120, 32, None, None) {

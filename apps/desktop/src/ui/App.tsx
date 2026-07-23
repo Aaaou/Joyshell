@@ -26,6 +26,7 @@ import {
   HardDrive,
   MemoryStick,
   Minus,
+  Minimize2,
   Network,
   Palette,
   PanelBottom,
@@ -62,6 +63,7 @@ import {
   listFolders,
   listProfiles,
   measureLatency,
+  measureSessionLatency,
   revealLocalPath,
   saveCommandSnippet,
   saveFolder,
@@ -96,7 +98,7 @@ type SessionEventPayload =
   | { SftpProgress: SftpProgress };
 
 const isDesktopRuntime = "__TAURI_INTERNALS__" in window;
-const clientBuildLabel = "0.1.0 sftp-animated-transfer-20260722";
+const clientBuildLabel = "0.1.23 resize-bg-stabilized-20260723";
 const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
 
 function applySidebarPositionGradient(
@@ -222,6 +224,15 @@ type DangerConfirmState = {
   message: string;
 };
 
+type TextInputDialogState = {
+  title: string;
+  message?: string;
+  label: string;
+  initialValue: string;
+  placeholder?: string;
+  confirmLabel?: string;
+};
+
 type ImageCropRequest = {
   target: "splash" | "terminal-background";
   title: string;
@@ -292,6 +303,7 @@ export function App() {
   const [editingProfile, setEditingProfile] = useState<SessionProfile | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [windowMaximized, setWindowMaximized] = useState(false);
   const [commandDraft, setCommandDraft] = useState("");
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const [activeBottomView, setActiveBottomView] = useState<"files" | "commands">("files");
@@ -321,6 +333,7 @@ export function App() {
   const [sftpDropActive, setSftpDropActive] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
+  const [textInputDialog, setTextInputDialog] = useState<TextInputDialogState | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
   const [editingRemotePath, setEditingRemotePath] = useState<string | null>(null);
@@ -332,14 +345,17 @@ export function App() {
   const fileRegionRef = useRef<HTMLElement | null>(null);
   const terminalMirrorRef = useRef(terminalSeed);
   const terminalCacheRef = useRef<Record<string, string>>({ empty: READY_TERMINAL_OUTPUT });
+  const terminalDisconnectNoticeRef = useRef<Record<string, string>>({});
   const activeProfileIdRef = useRef<string | null>(null);
   const previousSystemSnapshotRef = useRef<SystemSnapshot | null>(null);
   const systemSyncInFlightRef = useRef(false);
   const systemSyncFailureCountRef = useRef(0);
+  const latencyTimeoutCountRef = useRef<Record<string, number>>({});
   const draggedProfileIdRef = useRef<string | null>(null);
   const draggedTabProfileIdRef = useRef<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const dangerConfirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const textInputDialogResolverRef = useRef<((value: string | null) => void) | null>(null);
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const dragIndicatorRef = useRef<DragIndicator | null>(null);
   const suppressNextClickRef = useRef(false);
@@ -381,6 +397,32 @@ export function App() {
       terminalRef.current?.write(data);
     }
   }, []);
+
+  const appendSessionStateNotice = useCallback((sessionId: string, state: SessionInfo["state"]) => {
+    if (isConnectedState(state) || state === "Connecting" || state === "Reconnecting") {
+      delete terminalDisconnectNoticeRef.current[sessionId];
+      return;
+    }
+
+    const reason = getDisconnectedReason(state);
+    const notice = `\r\n[disconnected] ${reason}\r\n`;
+    if (terminalDisconnectNoticeRef.current[sessionId]) {
+      return;
+    }
+    terminalDisconnectNoticeRef.current[sessionId] = notice;
+    appendTerminalOutput(notice, sessionId);
+  }, [appendTerminalOutput]);
+
+  const markSessionDisconnected = useCallback((sessionId: string, reason: string) => {
+    const state: SessionInfo["state"] = { Failed: { reason } };
+    latencyTimeoutCountRef.current[sessionId] = 0;
+    setLatencyMs(null);
+    setLatencyStatus("断开");
+    setSessions((current) =>
+      current.map((session) => session.id === sessionId ? { ...session, state } : session)
+    );
+    appendSessionStateNotice(sessionId, state);
+  }, [appendSessionStateNotice]);
 
   const syncTerminalTail = useCallback((tail: string, profileId?: string | null) => {
     const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
@@ -514,6 +556,9 @@ export function App() {
       return;
     }
 
+    void getCurrentWindow().setBackgroundColor("#f6f7fb").catch(() => undefined);
+    void getCurrentWebview().setBackgroundColor("#f6f7fb").catch(() => undefined);
+
     let unlisten: (() => void) | undefined;
     let unlistenResize: (() => void) | undefined;
     let monitor: Monitor | null = null;
@@ -555,9 +600,6 @@ export function App() {
     });
     void getCurrentWindow().onResized(({ payload }) => {
       windowSize = payload;
-      if (windowPosition) {
-        applySidebarPositionGradient(windowPosition, monitor, payload);
-      }
     }).then((dispose) => {
       unlistenResize = dispose;
     });
@@ -572,7 +614,7 @@ export function App() {
         monitor = nextMonitor;
         windowPosition = position;
         windowSize = size;
-        if (moved || resized) {
+        if (moved) {
           applySidebarPositionGradient(position, monitor, size);
         }
       }).catch(() => {
@@ -601,6 +643,39 @@ export function App() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [hasActiveTransfer]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime) {
+      return;
+    }
+
+    let unlistenResize: (() => void) | undefined;
+    let disposed = false;
+    const syncMaximizedState = () => {
+      const appWindow = getCurrentWindow();
+      void appWindow.isMaximized().then((maximized) => {
+        if (!disposed) {
+          setWindowMaximized(maximized);
+        }
+      }).catch(() => {
+        if (!disposed) {
+          setWindowMaximized(false);
+        }
+      });
+    };
+
+    syncMaximizedState();
+    void getCurrentWindow().onResized(() => {
+      syncMaximizedState();
+    }).then((dispose) => {
+      unlistenResize = dispose;
+    });
+
+    return () => {
+      disposed = true;
+      unlistenResize?.();
+    };
+  }, []);
 
   useEffect(() => {
     void Promise.all([
@@ -645,6 +720,16 @@ export function App() {
         setSessions((current) =>
           current.map((session) => session.id === session_id ? { ...session, state } : session)
         );
+        if (
+          session_id === activeProfileIdRef.current
+          && !isConnectedState(state)
+          && state !== "Connecting"
+          && state !== "Reconnecting"
+        ) {
+          setLatencyMs(null);
+          setLatencyStatus("断开");
+        }
+        appendSessionStateNotice(session_id, state);
         return;
       }
 
@@ -665,7 +750,7 @@ export function App() {
     return () => {
       unlisten?.();
     };
-  }, [appendTerminalOutput, upsertTransfer]);
+  }, [appendSessionStateNotice, appendTerminalOutput, upsertTransfer]);
 
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.id === activeProfileId),
@@ -807,6 +892,9 @@ export function App() {
       setSelectedRemotePath(null);
       setSftpStatus("等待连接");
       previousSystemSnapshotRef.current = null;
+      if (activeProfile?.id) {
+        latencyTimeoutCountRef.current[activeProfile.id] = 0;
+      }
       return;
     }
 
@@ -831,16 +919,45 @@ export function App() {
   }, [activeSession?.id, syncTerminalTail]);
 
   useEffect(() => {
-    const target = resolveLatencyTarget(activeProfile);
-    if (!target) {
+    const target = activeSession ? resolveLatencyTarget(activeProfile) : null;
+    if (!target || !activeSession) {
       setLatencyMs(null);
-      setLatencyStatus("待连接");
+      setLatencyStatus(activeProfile?.id && terminalDisconnectNoticeRef.current[activeProfile.id] ? "断开" : "待连接");
+      if (activeProfile?.id) {
+        latencyTimeoutCountRef.current[activeProfile.id] = 0;
+      }
       return;
     }
 
     let cancelled = false;
+    const confirmSessionReachable = async (sessionId: string) => {
+      setLatencyMs(null);
+      setLatencyStatus("确认中");
+      try {
+        const value = await measureSessionLatency(sessionId);
+        if (cancelled) {
+          return true;
+        }
+        if (value === null) {
+          return false;
+        }
+        setLatencyMs(value);
+        setLatencyStatus("SSH RTT");
+        latencyTimeoutCountRef.current[sessionId] = 0;
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const failTimedOutSession = (sessionId: string) => {
+      const reason = "SSH connection timed out.";
+      markSessionDisconnected(sessionId, reason);
+      void disconnectProfile(sessionId).catch(() => undefined);
+    };
+
     const refreshLatency = async () => {
-      const sessionId = activeSession?.id;
+      const sessionId = activeSession.id;
       if (sessionId && activeProfile?.use_terminal_latency_probe) {
         if (shouldSkipActiveLatencyProbe(sessionId, Date.now(), {
           lastInputAt: lastTerminalInputAtRef.current,
@@ -850,10 +967,20 @@ export function App() {
           return;
         }
         if (interactiveLatencySamplesRef.current[sessionId]?.length) {
-          return;
+          setLatencyMs(averageLatencySamples(interactiveLatencySamplesRef.current[sessionId]));
+          setLatencyStatus("交互平均");
         }
+        setLatencyStatus("测量中");
+        const reachable = await confirmSessionReachable(sessionId);
+        if (!cancelled && !reachable) {
+          failTimedOutSession(sessionId);
+        }
+        return;
+      }
+
+      if (terminalDisconnectNoticeRef.current[sessionId]) {
         setLatencyMs(null);
-        setLatencyStatus("等待交互");
+        setLatencyStatus("断开");
         return;
       }
 
@@ -867,12 +994,22 @@ export function App() {
         if (cancelled) {
           return;
         }
+        if (value === null) {
+          const reachable = await confirmSessionReachable(sessionId);
+          if (!cancelled && !reachable) {
+            failTimedOutSession(sessionId);
+          }
+          return;
+        }
         setLatencyMs(value);
-        setLatencyStatus(value === null ? "timeout" : "已同步");
+        setLatencyStatus("已同步");
+        latencyTimeoutCountRef.current[sessionId] = 0;
       } catch {
         if (!cancelled) {
-          setLatencyMs(null);
-          setLatencyStatus("timeout");
+          const reachable = await confirmSessionReachable(sessionId);
+          if (!cancelled && !reachable) {
+            failTimedOutSession(sessionId);
+          }
         }
       }
     };
@@ -880,7 +1017,7 @@ export function App() {
     void refreshLatency();
     const timer = window.setInterval(() => {
       void refreshLatency();
-    }, 8000);
+    }, 3000);
 
     return () => {
       cancelled = true;
@@ -890,7 +1027,8 @@ export function App() {
     activeProfile?.host,
     activeProfile?.port,
     activeProfile?.use_terminal_latency_probe,
-    activeSession?.id
+    activeSession?.id,
+    markSessionDisconnected
   ]);
 
   const flash = useCallback((message: string) => {
@@ -1216,10 +1354,22 @@ export function App() {
           ? `同步重试中 ${systemSyncFailureCountRef.current}/3`
           : `同步失败：${message}`
       );
+      if (systemSyncFailureCountRef.current >= 3) {
+        const sessionId = activeSession.id;
+        void measureSessionLatency(sessionId).then((value) => {
+          if (value === null) {
+            markSessionDisconnected(sessionId, "SSH connection timed out.");
+            void disconnectProfile(sessionId).catch(() => undefined);
+          }
+        }).catch(() => {
+          markSessionDisconnected(sessionId, "SSH connection timed out.");
+          void disconnectProfile(sessionId).catch(() => undefined);
+        });
+      }
     } finally {
       systemSyncInFlightRef.current = false;
     }
-  }, [activeSession]);
+  }, [activeSession, markSessionDisconnected]);
 
   const refreshSftpListing = useCallback(async (path = sftpPath) => {
     if (!activeSession) {
@@ -1308,8 +1458,11 @@ export function App() {
   const handleInput = useCallback(
     (data: string) => {
       setTerminalInputCount((count) => count + 1);
-      const targetSessionId = activeSession?.id ?? activeProfile?.id;
+      const targetSessionId = activeSession?.id;
       if (!targetSessionId) {
+        if (activeProfile?.id) {
+          appendSessionStateNotice(activeProfile.id, "Disconnected");
+        }
         return;
       }
       const startedAt = Date.now();
@@ -1324,7 +1477,7 @@ export function App() {
         });
       });
     },
-    [activeProfile?.id, activeSession?.id]
+    [activeProfile?.id, activeSession?.id, appendSessionStateNotice]
   );
 
   const sendCommandDraft = useCallback(() => {
@@ -1333,8 +1486,11 @@ export function App() {
       terminalRef.current?.focus();
       return;
     }
-    const targetSessionId = activeSession?.id ?? activeProfile?.id;
+    const targetSessionId = activeSession?.id;
     if (!targetSessionId) {
+      if (activeProfile?.id) {
+        appendSessionStateNotice(activeProfile.id, "Disconnected");
+      }
       flash("请先连接 SSH session");
       return;
     }
@@ -1349,7 +1505,7 @@ export function App() {
       flash(`命令发送失败：${message}`);
     });
     setCommandDraft("");
-  }, [activeProfile?.id, activeSession?.id, commandDraft, flash]);
+  }, [activeProfile?.id, activeSession?.id, appendSessionStateNotice, commandDraft, flash]);
 
   const resolveCommandTargetSessions = useCallback(() => {
     if (commandSendMode === "current") {
@@ -1464,20 +1620,43 @@ export function App() {
     }
   }, [refreshSftpListing, sftpListing?.parent]);
 
+  const requestTextInput = useCallback((dialog: TextInputDialogState) => new Promise<string | null>((resolve) => {
+    textInputDialogResolverRef.current?.(null);
+    textInputDialogResolverRef.current = resolve;
+    setTextInputDialog(dialog);
+  }), []);
+
+  const closeTextInputDialog = useCallback((value: string | null) => {
+    textInputDialogResolverRef.current?.(value);
+    textInputDialogResolverRef.current = null;
+    setTextInputDialog(null);
+  }, []);
+
   const createRemoteDirectory = useCallback(async () => {
     if (!activeSession) {
       flash("请先连接 SSH session");
       return;
     }
-    const name = window.prompt("新建远程目录名称", "new-folder");
-    if (!name?.trim()) {
+    const name = await requestTextInput({
+      title: "新建远程目录",
+      label: "目录名称",
+      initialValue: "new-folder",
+      placeholder: "new-folder",
+      confirmLabel: "创建"
+    });
+    const cleanName = name?.trim();
+    if (!cleanName) {
       return;
     }
-    const target = joinRemotePath(sftpPath, name.trim());
+    if (cleanName.includes("/") || cleanName.includes("\\")) {
+      flash("目录名不能包含路径分隔符");
+      return;
+    }
+    const target = joinRemotePath(sftpPath, cleanName);
     setSftpBusy(true);
     try {
       await sftpCreateDir(activeSession.id, target);
-      flash(`已创建目录 ${name.trim()}`);
+      flash(`已创建目录 ${cleanName}`);
       await refreshSftpListing(sftpPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1486,7 +1665,7 @@ export function App() {
     } finally {
       setSftpBusy(false);
     }
-  }, [activeSession, flash, refreshSftpListing, sftpPath]);
+  }, [activeSession, flash, refreshSftpListing, requestTextInput, sftpPath]);
 
   const startRemoteEntryRename = useCallback((entry = selectedRemoteEntry) => {
     if (!entry) {
@@ -2081,9 +2260,19 @@ export function App() {
   }, [profiles]);
 
   const createSessionFolder = useCallback(async () => {
-    const name = window.prompt("新建文件夹名称", "项目服务器");
+    const name = await requestTextInput({
+      title: "新建文件夹",
+      label: "文件夹名称",
+      initialValue: createUniqueFolderName(folders, "项目服务器"),
+      placeholder: "项目服务器",
+      confirmLabel: "创建"
+    });
     const cleanName = name?.trim();
     if (!cleanName) {
+      return;
+    }
+    if (folders.some((folder) => folder.name.trim() === cleanName)) {
+      flash("文件夹名称已存在");
       return;
     }
 
@@ -2106,7 +2295,7 @@ export function App() {
       const message = error instanceof Error ? error.message : String(error);
       flash(`创建文件夹失败：${message}`);
     }
-  }, [flash]);
+  }, [flash, folders, requestTextInput]);
 
   const openCreateContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
@@ -2165,7 +2354,11 @@ export function App() {
       flash("桌面打包版本可使用窗口控制");
       return;
     }
-    void getCurrentWindow().toggleMaximize();
+    const appWindow = getCurrentWindow();
+    void appWindow.toggleMaximize()
+      .then(() => appWindow.isMaximized())
+      .then(setWindowMaximized)
+      .catch(() => setWindowMaximized(false));
   }, [flash]);
 
   const closeWindow = useCallback(() => {
@@ -2227,8 +2420,8 @@ export function App() {
             <button title="最小化" onClick={minimizeWindow}>
               <Minus size={15} />
             </button>
-            <button title="最大化/还原" onClick={toggleMaximizeWindow}>
-              <Square size={12} />
+            <button title={windowMaximized ? "还原" : "最大化"} onClick={toggleMaximizeWindow}>
+              {windowMaximized ? <Minimize2 size={13} /> : <Square size={12} />}
             </button>
             <button className="close" title="关闭" onClick={closeWindow}>
               <X size={15} />
@@ -2236,7 +2429,7 @@ export function App() {
           </div>
         </header>
 
-        <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+        <aside className={`sidebar ${appSettingsOpen ? "settings-sidebar-mode" : "session-sidebar-mode"} ${sidebarCollapsed ? "collapsed" : ""}`}>
           {!appSettingsOpen ? (
           <div className="status-card">
             <div className="status-line">
@@ -2311,7 +2504,7 @@ export function App() {
               </div>
             </>
           ) : (
-            <>
+            <div className="sidebar-session-shell">
           <label className="search-box">
             <Search size={15} />
             <input
@@ -2490,7 +2683,7 @@ export function App() {
               <Download size={13} />
             </button>
           </div>
-            </>
+            </div>
           )}
         </aside>
       </div>
@@ -2521,7 +2714,7 @@ export function App() {
       ) : (
           <main className={`workspace ${!activeProfile ? "home-mode" : ""}`}>
         <section
-          className="terminal-region"
+          className={`terminal-region ${bottomPanelOpen ? "file-panel-open" : "file-panel-closed"}`}
           onContextMenu={(event) => openAppContextMenu("terminal", event)}
         >
           <button
@@ -2630,7 +2823,7 @@ export function App() {
             ) : (
               <>
                 <JoyTerminal
-                  id={activeSession?.id ?? "empty"}
+                  id={activeProfile?.id ?? "empty"}
                   initialOutput={terminalSeed}
                   onInput={handleInput}
                   onReady={(terminal) => {
@@ -3103,6 +3296,19 @@ export function App() {
         />
       ) : null}
 
+      {textInputDialog ? (
+        <TextInputDialog
+          title={textInputDialog.title}
+          message={textInputDialog.message}
+          label={textInputDialog.label}
+          initialValue={textInputDialog.initialValue}
+          placeholder={textInputDialog.placeholder}
+          confirmLabel={textInputDialog.confirmLabel}
+          onCancel={() => closeTextInputDialog(null)}
+          onConfirm={(value) => closeTextInputDialog(value)}
+        />
+      ) : null}
+
       {notice ? <div className="toast">{notice}</div> : null}
       {systemDialogOpen ? (
         <SystemInfoDialog
@@ -3509,6 +3715,9 @@ function formatRate(bytesPerSecond: number) {
 }
 
 function formatLatency(ms: number | null, status: string) {
+  if (status === "断开") {
+    return "--";
+  }
   if (ms === null) {
     return status;
   }
@@ -3587,6 +3796,13 @@ function formatTransferStatus(transfer: SftpProgress) {
 
 function isConnectedState(state: SessionInfo["state"]) {
   return state === "Connected";
+}
+
+function getDisconnectedReason(state: SessionInfo["state"]) {
+  if (typeof state === "object" && "Failed" in state) {
+    return state.Failed.reason || "SSH session closed.";
+  }
+  return "SSH session closed.";
 }
 
 function createTransferProgress({
@@ -3759,6 +3975,13 @@ function recordInteractiveLatencySample(
   return samples.reduce((sum, sample) => sum + sample, 0) / samples.length;
 }
 
+function averageLatencySamples(samples: number[] | undefined) {
+  if (!samples?.length) {
+    return null;
+  }
+  return samples.reduce((sum, sample) => sum + sample, 0) / samples.length;
+}
+
 function createUniqueBlankProfile(profiles: SessionProfile[], group: string | null = null): SessionProfile {
   const nextOrder = profiles.reduce((max, profile) => Math.max(max, profile.sort_order ?? 0), -1) + 1;
   return { ...createBlankProfile(createUniqueProfileName(profiles, "新建服务器"), group), sort_order: nextOrder };
@@ -3766,6 +3989,19 @@ function createUniqueBlankProfile(profiles: SessionProfile[], group: string | nu
 
 function createUniqueProfileName(profiles: SessionProfile[], baseName: string) {
   const existingNames = new Set(profiles.map((profile) => profile.name.trim()).filter(Boolean));
+  if (!existingNames.has(baseName)) {
+    return baseName;
+  }
+
+  let index = 1;
+  while (existingNames.has(`${baseName}${index}`)) {
+    index += 1;
+  }
+  return `${baseName}${index}`;
+}
+
+function createUniqueFolderName(folders: SessionFolder[], baseName: string) {
+  const existingNames = new Set(folders.map((folder) => folder.name.trim()).filter(Boolean));
   if (!existingNames.has(baseName)) {
     return baseName;
   }
@@ -4727,6 +4963,91 @@ function UsageBar({ value, tone }: { value: number; tone: "cpu" | "memory" | "sw
   );
 }
 
+function TextInputDialog({
+  title,
+  message,
+  label,
+  initialValue,
+  placeholder,
+  confirmLabel = "确定",
+  onCancel,
+  onConfirm
+}: {
+  title: string;
+  message?: string;
+  label: string;
+  initialValue: string;
+  placeholder?: string;
+  confirmLabel?: string;
+  onCancel: () => void;
+  onConfirm: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const cleanValue = value.trim();
+
+  useEffect(() => {
+    window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  }, []);
+
+  return (
+    <div className="modal-backdrop text-input-backdrop" role="presentation" onMouseDown={onCancel}>
+      <form
+        className="text-input-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (cleanValue) {
+            onConfirm(cleanValue);
+          }
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="danger-confirm-titlebar">
+          <div className="danger-confirm-title">
+            <span className="text-input-icon">
+              <FolderPlus size={17} />
+            </span>
+            <strong>{title}</strong>
+          </div>
+          <button className="dialog-close" type="button" onClick={onCancel} title="取消">
+            <X size={15} />
+          </button>
+        </header>
+        <div className="text-input-body">
+          {message ? <p>{message}</p> : null}
+          <label>
+            <span>{label}</span>
+            <input
+              ref={inputRef}
+              value={value}
+              placeholder={placeholder}
+              onChange={(event) => setValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancel();
+                }
+              }}
+            />
+          </label>
+        </div>
+        <footer className="danger-confirm-actions text-input-actions">
+          <button className="secondary-button" type="button" onClick={onCancel}>取消</button>
+          <button className="primary-confirm-button" type="submit" disabled={!cleanValue}>
+            {confirmLabel}
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 function DangerConfirmDialog({
   title,
   message,
@@ -4964,20 +5285,20 @@ function AppSettingsWorkspace({
             <span>{activePage === "general" ? "常规" : "外观"}</span>
           </header>
           {activePage === "general" ? (
-            <div className="settings-page">
+            <div className="settings-page general-settings-page">
               <section>
                 <strong>启动</strong>
                 <label className="settings-toggle-row">
                   <span>
-                    <b>启动后恢复上次会话</b>
-                    <small>后续接入持久化会话状态后启用。</small>
+                    <b>恢复上次会话</b>
+                    <small>持久化会话接入后启用。</small>
                   </span>
                   <input type="checkbox" disabled />
                 </label>
                 <label className="settings-toggle-row">
                   <span>
-                    <b>连接后自动刷新文件列表</b>
-                    <small>当前版本默认启用。</small>
+                    <b>自动刷新文件列表</b>
+                    <small>SSH 连接后同步 SFTP。</small>
                   </span>
                   <input type="checkbox" defaultChecked readOnly />
                 </label>
@@ -4986,8 +5307,8 @@ function AppSettingsWorkspace({
                 <strong>传输</strong>
                 <label className="settings-toggle-row">
                   <span>
-                    <b>显示传输速度和预计时间</b>
-                    <small>完成后自动隐藏实时速度。</small>
+                    <b>速度和预计时间</b>
+                    <small>任务完成后隐藏实时速度。</small>
                   </span>
                   <input type="checkbox" defaultChecked readOnly />
                 </label>
@@ -4996,8 +5317,8 @@ function AppSettingsWorkspace({
                 <strong>危险操作</strong>
                 <label className="settings-toggle-row">
                   <span>
-                    <b>删除时不再二次确认</b>
-                    <small>默认关闭。开启后删除服务器、远程文件和传输记录将直接执行。</small>
+                    <b>跳过删除确认</b>
+                    <small>关闭时删除前弹出确认。</small>
                   </span>
                   <input
                     type="checkbox"
