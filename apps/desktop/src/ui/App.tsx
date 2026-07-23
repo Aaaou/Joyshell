@@ -269,6 +269,22 @@ type DragIndicator =
 
 type SidebarSortMode = "custom" | "name" | "host";
 
+type CommandHistoryEntry = {
+  id: string;
+  command: string;
+  scope: string;
+  timestamp: number;
+};
+
+const LEFT_SIDEBAR_WIDTH_STORAGE_KEY = "joyshell:left-sidebar-width:v1";
+const RIGHT_SIDEBAR_WIDTH_STORAGE_KEY = "joyshell:right-sidebar-width:v1";
+const COMMAND_HISTORY_LIMIT = 48;
+const LEFT_SIDEBAR_MIN_WIDTH = 180;
+const LEFT_SIDEBAR_MAX_WIDTH = 420;
+const RIGHT_SIDEBAR_MIN_WIDTH = 280;
+const RIGHT_SIDEBAR_MAX_WIDTH = 560;
+const PANEL_WORKSPACE_MIN_WIDTH = 420;
+
 export function App() {
   const [profiles, setProfiles] = useState<SessionProfile[]>([]);
   const [sidebarSortMode, setSidebarSortMode] = useState<SidebarSortMode>("custom");
@@ -280,6 +296,8 @@ export function App() {
   const [assistantOpen, setAssistantOpen] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadStoredPanelWidth(LEFT_SIDEBAR_WIDTH_STORAGE_KEY, 238));
+  const [inspectorWidth, setInspectorWidth] = useState(() => loadStoredPanelWidth(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY, 360));
   const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>({
     restore_last_layout: false,
     default_left_sidebar_open: true,
@@ -313,6 +331,7 @@ export function App() {
   const [commandBodyDraft, setCommandBodyDraft] = useState("");
   const [commandSendMode, setCommandSendMode] = useState<"current" | "all" | "selected">("current");
   const [selectedCommandTargets, setSelectedCommandTargets] = useState<Record<string, boolean>>({});
+  const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
   const [terminalInputCount, setTerminalInputCount] = useState(0);
   const [splashVisible, setSplashVisible] = useState(true);
   const [splashClosing, setSplashClosing] = useState(false);
@@ -360,10 +379,17 @@ export function App() {
   const dragIndicatorRef = useRef<DragIndicator | null>(null);
   const suppressNextClickRef = useRef(false);
   const profilesRef = useRef<SessionProfile[]>([]);
+  const panelResizeRef = useRef<{
+    side: "left" | "right";
+    startX: number;
+    startSidebarWidth: number;
+    startInspectorWidth: number;
+  } | null>(null);
   const lastTerminalInputAtRef = useRef<Record<string, number>>({});
   const lastTerminalOutputAtRef = useRef<Record<string, number>>({});
   const pendingInteractiveLatencyRef = useRef<Record<string, number>>({});
   const interactiveLatencySamplesRef = useRef<Record<string, number[]>>({});
+  const commandHistoryIdRef = useRef(0);
 
   const replaceTerminalOutput = useCallback((data: string, profileId?: string | null) => {
     const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
@@ -1327,6 +1353,87 @@ export function App() {
     }
   }, [layoutSettings.restore_last_layout, saveLayoutPreference]);
 
+  useEffect(() => {
+    saveStoredPanelWidth(LEFT_SIDEBAR_WIDTH_STORAGE_KEY, sidebarWidth);
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    saveStoredPanelWidth(RIGHT_SIDEBAR_WIDTH_STORAGE_KEY, inspectorWidth);
+  }, [inspectorWidth]);
+
+  const pushCommandHistory = useCallback((command: string, scope: string) => {
+    const cleanCommand = command.trim();
+    if (!cleanCommand) {
+      return;
+    }
+    commandHistoryIdRef.current += 1;
+    const entry: CommandHistoryEntry = {
+      id: `${Date.now()}-${commandHistoryIdRef.current}`,
+      command: cleanCommand,
+      scope,
+      timestamp: Date.now()
+    };
+    setCommandHistory((current) => [...current, entry].slice(-COMMAND_HISTORY_LIMIT));
+  }, []);
+
+  const startPanelResize = useCallback((side: "left" | "right", event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    panelResizeRef.current = {
+      side,
+      startX: event.clientX,
+      startSidebarWidth: sidebarWidth,
+      startInspectorWidth: inspectorWidth
+    };
+  }, [inspectorWidth, sidebarWidth]);
+
+  const updatePanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = panelResizeRef.current;
+    if (!drag) {
+      return;
+    }
+
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1280;
+    if (drag.side === "left") {
+      const currentInspector = assistantOpen ? inspectorWidth : 48;
+      const maxWidth = Math.max(
+        LEFT_SIDEBAR_MIN_WIDTH,
+        Math.min(LEFT_SIDEBAR_MAX_WIDTH, viewportWidth - currentInspector - PANEL_WORKSPACE_MIN_WIDTH)
+      );
+      const nextWidth = clampNumber(
+        drag.startSidebarWidth + (event.clientX - drag.startX),
+        LEFT_SIDEBAR_MIN_WIDTH,
+        maxWidth
+      );
+      setSidebarWidth(nextWidth);
+      return;
+    }
+
+    const currentSidebar = sidebarCollapsed ? 0 : sidebarWidth;
+    const maxWidth = Math.max(
+      RIGHT_SIDEBAR_MIN_WIDTH,
+      Math.min(RIGHT_SIDEBAR_MAX_WIDTH, viewportWidth - currentSidebar - PANEL_WORKSPACE_MIN_WIDTH)
+    );
+    const nextWidth = clampNumber(
+      drag.startInspectorWidth + (drag.startX - event.clientX),
+      RIGHT_SIDEBAR_MIN_WIDTH,
+      maxWidth
+    );
+    setInspectorWidth(nextWidth);
+  }, [assistantOpen, inspectorWidth, sidebarCollapsed, sidebarWidth]);
+
+  const endPanelResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = panelResizeRef.current;
+    if (!drag) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    panelResizeRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }, []);
+
   const refreshSystemSnapshot = useCallback(async () => {
     if (!activeSession) {
       setSystemStatus("未连接");
@@ -1494,7 +1601,9 @@ export function App() {
       flash("请先连接 SSH session");
       return;
     }
+    const scope = activeSession?.profile_name ?? activeProfile?.name ?? "当前设备";
     void writeTerminal(targetSessionId, `${command}\r`).then(() => {
+      pushCommandHistory(command, scope);
       terminalRef.current?.focus();
     }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -1505,7 +1614,7 @@ export function App() {
       flash(`命令发送失败：${message}`);
     });
     setCommandDraft("");
-  }, [activeProfile?.id, activeSession?.id, appendSessionStateNotice, commandDraft, flash]);
+  }, [activeProfile?.id, activeProfile?.name, activeSession?.id, activeSession?.profile_name, appendSessionStateNotice, commandDraft, flash, pushCommandHistory]);
 
   const resolveCommandTargetSessions = useCallback(() => {
     if (commandSendMode === "current") {
@@ -1530,13 +1639,17 @@ export function App() {
     }
     try {
       await Promise.all(targets.map((session) => writeTerminal(session.id, `${cleanCommand}\r`)));
+      pushCommandHistory(
+        cleanCommand,
+        targets.length === 1 ? targets[0].profile_name : `${targets.length} 台设备`
+      );
       flash(`已发送到 ${targets.length} 台设备`);
       terminalRef.current?.focus();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       flash(`命令发送失败：${message}`);
     }
-  }, [flash, resolveCommandTargetSessions]);
+  }, [flash, pushCommandHistory, resolveCommandTargetSessions]);
 
   const saveCommandDraft = useCallback(async () => {
     const title = commandTitleDraft.trim();
@@ -2378,6 +2491,10 @@ export function App() {
   const hasWorkspaceBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_workspace);
   const hasHomeBackground = Boolean(terminalBackgroundImage && (layoutSettings.terminal_background_apply_home || usingDefaultTerminalBackground));
   const appCustomStyle = {
+    gridTemplateColumns: `${sidebarCollapsed ? 0 : sidebarWidth}px minmax(0, 1fr) ${assistantOpen ? inspectorWidth : 48}px`,
+    "--sidebar-rail-width": `${sidebarCollapsed ? 0 : sidebarWidth}px`,
+    "--titlebar-left-width": `${sidebarCollapsed ? 0 : sidebarWidth}px`,
+    "--inspector-width": `${assistantOpen ? inspectorWidth : 48}px`,
     "--joy-custom-background-image": terminalBackgroundImage ? `url("${escapeCssUrl(terminalBackgroundImage)}")` : "none",
     "--joy-custom-background-opacity": String(terminalBackgroundOpacity)
   } as React.CSSProperties;
@@ -2430,6 +2547,16 @@ export function App() {
         </header>
 
         <aside className={`sidebar ${appSettingsOpen ? "settings-sidebar-mode" : "session-sidebar-mode"} ${sidebarCollapsed ? "collapsed" : ""}`}>
+          {!sidebarCollapsed ? (
+            <div
+              className="sidebar-resize-handle sidebar-resize-handle-left"
+              aria-hidden="true"
+              onPointerDown={(event) => startPanelResize("left", event)}
+              onPointerMove={updatePanelResize}
+              onPointerUp={endPanelResize}
+              onPointerCancel={endPanelResize}
+            />
+          ) : null}
           {!appSettingsOpen ? (
           <div className="status-card">
             <div className="status-line">
@@ -2715,6 +2842,24 @@ export function App() {
           >
             <PanelRight size={17} />
           </button>
+          {activeProfile && commandHistory.length > 0 ? (
+            <div className="command-history-rail" aria-label="命令历史">
+              {commandHistory.slice(-32).map((entry) => (
+                <button
+                  className="command-history-item"
+                  key={entry.id}
+                  title={`${entry.scope}\n${entry.command}`}
+                  onClick={() => setCommandDraft(entry.command)}
+                >
+                  <span className="command-history-bar" />
+                  <span className="command-history-label">
+                    <strong>{entry.scope}</strong>
+                    <small>{entry.command}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div
             className="terminal-tabs"
             onDragOver={(event) => {
@@ -3053,6 +3198,16 @@ export function App() {
 
       {!appSettingsOpen ? (
       <aside className="inspector" aria-label="AI assistant panel">
+        {assistantOpen ? (
+          <div
+            className="sidebar-resize-handle sidebar-resize-handle-right"
+            aria-hidden="true"
+            onPointerDown={(event) => startPanelResize("right", event)}
+            onPointerMove={updatePanelResize}
+            onPointerUp={endPanelResize}
+            onPointerCancel={endPanelResize}
+          />
+        ) : null}
         <div className="drawer-rail" />
         <div className="drawer-content">
           <section className="panel transfer-panel">
@@ -4629,6 +4784,27 @@ function loadCollapsedSessionFolders() {
     return new Set(parsed.filter((item): item is string => typeof item === "string"));
   } catch {
     return new Set<string>();
+  }
+}
+
+function loadStoredPanelWidth(storageKey: string, fallback: number) {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStoredPanelWidth(storageKey: string, width: number) {
+  try {
+    window.localStorage.setItem(storageKey, String(width));
+  } catch {
+    // Layout width persistence is best-effort only.
   }
 }
 
