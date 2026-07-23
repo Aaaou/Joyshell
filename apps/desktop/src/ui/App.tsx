@@ -11,6 +11,7 @@ import {
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import defaultWorkspaceBackground from "../assets/backgrounds/default-workspace-bg.jpg";
 import splashCenterImage from "../assets/splash/center-joy-cropped.png";
 import {
   ChevronRight,
@@ -2176,9 +2177,10 @@ export function App() {
   }, [flash]);
 
   const splashCenterImageSrc = layoutSettings.splash_center_image_data_url || splashCenterImage;
-  const terminalBackgroundImage = layoutSettings.terminal_background_image_data_url;
+  const usingDefaultTerminalBackground = !layoutSettings.terminal_background_image_data_url;
+  const terminalBackgroundImage = layoutSettings.terminal_background_image_data_url || defaultWorkspaceBackground;
   const hasWorkspaceBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_workspace);
-  const hasHomeBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_home);
+  const hasHomeBackground = Boolean(terminalBackgroundImage && (layoutSettings.terminal_background_apply_home || usingDefaultTerminalBackground));
   const appCustomStyle = {
     "--joy-custom-background-image": terminalBackgroundImage ? `url("${escapeCssUrl(terminalBackgroundImage)}")` : "none",
     "--joy-custom-background-opacity": String(clampNumber(layoutSettings.terminal_background_opacity, 0, 100) / 100)
@@ -2186,7 +2188,7 @@ export function App() {
 
   return (
     <div
-      className={`app-shell ${appSettingsOpen ? "settings-mode" : ""} ${hasWorkspaceBackground ? "has-workspace-bg" : ""} ${hasHomeBackground ? "has-home-bg" : ""} ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}
+      className={`app-shell ${!appSettingsOpen && !activeProfile ? "home-mode" : ""} ${appSettingsOpen ? "settings-mode" : ""} ${hasWorkspaceBackground ? "has-workspace-bg" : ""} ${hasHomeBackground ? "has-home-bg" : ""} ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}
       style={appCustomStyle}
     >
       {splashVisible ? <JoyshellSplash closing={splashClosing} centerImage={splashCenterImageSrc} /> : null}
@@ -5042,7 +5044,7 @@ function AppSettingsWorkspace({
                 <strong>Shell 背景</strong>
                 <div className="image-personalization-row background-row">
                   <div className="terminal-background-preview">
-                    {layout.terminal_background_image_data_url ? <img src={layout.terminal_background_image_data_url} alt="" /> : <span>未设置</span>}
+                    <img src={layout.terminal_background_image_data_url || defaultWorkspaceBackground} alt="" />
                   </div>
                   <div>
                     <b>命令行背景图片</b>
@@ -5053,7 +5055,7 @@ function AppSettingsWorkspace({
                       选择图片
                     </button>
                     <button className="secondary-button" onClick={() => onLayoutChange({ terminal_background_image_data_url: null })}>
-                      清除
+                      恢复默认
                     </button>
                   </div>
                   <input ref={backgroundInputRef} type="file" accept="image/*" hidden onChange={chooseTerminalBackground} />

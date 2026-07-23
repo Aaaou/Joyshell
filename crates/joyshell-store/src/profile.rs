@@ -62,7 +62,7 @@ impl Default for LayoutSettings {
             terminal_background_image_data_url: None,
             terminal_background_opacity: 28,
             terminal_background_apply_workspace: true,
-            terminal_background_apply_home: false,
+            terminal_background_apply_home: true,
         }
     }
 }

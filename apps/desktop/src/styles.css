@@ -844,9 +844,9 @@ button {
   gap: 8px;
   margin-top: auto;
   width: 100%;
-  min-height: 34px;
-  padding: 5px 10px 0;
-  border-top: 1px solid rgba(31, 35, 40, 0.1);
+  min-height: 30px;
+  padding: 4px 10px 1px;
+  border-top: 1px solid rgba(31, 35, 40, 0.08);
   border-radius: 0;
   background: transparent;
   box-shadow: none;
@@ -1453,8 +1453,8 @@ button {
   background: var(--terminal-bg);
 }
 
-.has-workspace-bg .terminal-region::before,
-.has-home-bg .connection-home::before {
+.app-shell:not(.home-mode).has-workspace-bg .terminal-region::before,
+.app-shell.home-mode.has-home-bg::after {
   position: absolute;
   inset: 0;
   z-index: 0;
@@ -1466,25 +1466,37 @@ button {
   opacity: var(--joy-custom-background-opacity, 0.28);
 }
 
-.has-workspace-bg .terminal-region,
-.has-home-bg .connection-home {
+.app-shell.home-mode.has-home-bg::after {
+  z-index: 0;
+}
+
+.app-shell:not(.home-mode).has-workspace-bg .terminal-region,
+.app-shell.home-mode.has-home-bg {
   isolation: isolate;
 }
 
-.has-workspace-bg .terminal-tabs,
-.has-workspace-bg .terminal-stage,
-.has-workspace-bg .joy-terminal,
-.has-home-bg .connection-home > * {
+.app-shell:not(.home-mode).has-workspace-bg .terminal-tabs,
+.app-shell:not(.home-mode).has-workspace-bg .terminal-stage,
+.app-shell:not(.home-mode).has-workspace-bg .joy-terminal,
+.app-shell.home-mode.has-home-bg .workspace,
+.app-shell.home-mode.has-home-bg .terminal-region,
+.app-shell.home-mode.has-home-bg .terminal-stage,
+.app-shell.home-mode.has-home-bg .connection-home,
+.app-shell.home-mode.has-home-bg .connection-home > * {
   position: relative;
   z-index: 1;
 }
 
-.has-workspace-bg .terminal-region,
-.has-workspace-bg .terminal-tabs,
-.has-workspace-bg .terminal-stage,
-.has-workspace-bg .joy-terminal,
-.has-workspace-bg .joy-terminal .xterm-viewport,
-.has-workspace-bg .joy-terminal .xterm-screen {
+.app-shell:not(.home-mode).has-workspace-bg .terminal-region,
+.app-shell:not(.home-mode).has-workspace-bg .terminal-tabs,
+.app-shell:not(.home-mode).has-workspace-bg .terminal-stage,
+.app-shell:not(.home-mode).has-workspace-bg .joy-terminal,
+.app-shell:not(.home-mode).has-workspace-bg .joy-terminal .xterm-viewport,
+.app-shell:not(.home-mode).has-workspace-bg .joy-terminal .xterm-screen,
+.app-shell.home-mode.has-home-bg .workspace,
+.app-shell.home-mode.has-home-bg .terminal-region,
+.app-shell.home-mode.has-home-bg .terminal-stage,
+.app-shell.home-mode.has-home-bg .connection-home {
   background: transparent !important;
 }
 
@@ -1497,7 +1509,7 @@ button {
   justify-items: center;
   gap: 28px;
   padding: 24px 36px 36px;
-  background: var(--terminal-bg);
+  background: transparent;
   outline: 0;
 }
 

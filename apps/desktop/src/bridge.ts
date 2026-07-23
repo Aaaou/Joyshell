@@ -69,7 +69,7 @@ const defaultLayoutSettings: LayoutSettings = {
   terminal_background_image_data_url: null,
   terminal_background_opacity: 28,
   terminal_background_apply_workspace: true,
-  terminal_background_apply_home: false
+  terminal_background_apply_home: true
 };
 
 export async function listProfiles(): Promise<SessionProfile[]> {
