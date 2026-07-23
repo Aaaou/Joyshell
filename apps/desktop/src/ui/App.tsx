@@ -98,7 +98,7 @@ type SessionEventPayload =
   | { SftpProgress: SftpProgress };
 
 const isDesktopRuntime = "__TAURI_INTERNALS__" in window;
-const clientBuildLabel = "0.1.26 workspace-bg-isolated-20260724";
+const clientBuildLabel = "0.1.27 settings-footer-clean-20260724";
 const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
 
 function applySidebarPositionGradient(
@@ -2491,15 +2491,6 @@ export function App() {
                     <strong>外观</strong>
                     <small>侧栏、面板和主题偏好</small>
                   </span>
-                </button>
-              </div>
-              <div className="sidebar-footer plain">
-                <button className="app-settings-button primary" onClick={() => setAppSettingsOpen(false)} title="返回会话">
-                  <ChevronRight className="back-icon" size={15} />
-                  <span>sessions</span>
-                </button>
-                <button className="app-settings-button update" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
-                  <Download size={13} />
                 </button>
               </div>
             </>

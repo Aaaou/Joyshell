@@ -467,7 +467,7 @@ button {
 }
 
 .sidebar.settings-sidebar-mode {
-  grid-template-rows: auto minmax(0, 1fr) 40px;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -1676,10 +1676,12 @@ button {
 }
 
 .profile-orbit-item small {
+  display: block;
   width: 96px;
   overflow: hidden;
   color: var(--muted-soft);
   font-size: 11px;
+  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0;
