@@ -4040,7 +4040,8 @@ function ConnectionHome({
   const [highlightedOrbitIndex, setHighlightedOrbitIndex] = useState(() => middleLoopCopy * profiles.length + selectedIndex);
   const selectedIndexRef = useRef(selectedIndex);
   const highlightedOrbitIndexRef = useRef(highlightedOrbitIndex);
-  const dragStateRef = useRef<{ lastX: number; lastAt: number; velocity: number; dragging: boolean } | null>(null);
+  const dragStateRef = useRef<{ startX: number; startY: number; lastX: number; lastAt: number; velocity: number; dragging: boolean } | null>(null);
+  const tapHandledRef = useRef(false);
   const scrollSelectionRafRef = useRef<number | null>(null);
   const orbitMomentumRafRef = useRef<number | null>(null);
   const orbitMomentumLastAtRef = useRef(0);
@@ -4239,10 +4240,25 @@ function ConnectionHome({
       return;
     }
     stopOrbitMomentum();
+    tapHandledRef.current = false;
     homeRef.current?.focus();
-    dragStateRef.current = { lastX: event.clientX, lastAt: performance.now(), velocity: 0, dragging: false };
+    dragStateRef.current = { startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastAt: performance.now(), velocity: 0, dragging: false };
     strip.setPointerCapture?.(event.pointerId);
   }, [stopOrbitMomentum]);
+
+  const activateHomeProfile = useCallback((profile: SessionProfile, orbitIndex: number) => {
+    const profileIndex = profiles.findIndex((item) => item.id === profile.id);
+    if (profileIndex < 0) {
+      return;
+    }
+    selectedIndexRef.current = profileIndex;
+    highlightedOrbitIndexRef.current = orbitIndex;
+    setSelectedIndex(profileIndex);
+    setHighlightedOrbitIndex(orbitIndex);
+    onSelect(profile);
+    onConnect(profile);
+    homeRef.current?.focus();
+  }, [onConnect, onSelect, profiles]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const strip = stripRef.current;
@@ -4254,7 +4270,8 @@ function ConnectionHome({
     const dt = Math.max(1, now - state.lastAt);
     const delta = event.clientX - state.lastX;
     const scrollDelta = -delta;
-    if (Math.abs(delta) > 3) {
+    const totalMove = Math.hypot(event.clientX - state.startX, event.clientY - state.startY);
+    if (totalMove > 8) {
       state.dragging = true;
     }
     strip.scrollLeft += scrollDelta;
@@ -4269,11 +4286,28 @@ function ConnectionHome({
     const dragState = dragStateRef.current;
     if (dragState?.dragging) {
       startOrbitMomentum(dragState.velocity);
+    } else {
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      const item = target?.closest?.<HTMLElement>(".profile-orbit-item");
+      const profileId = item?.dataset.profileId;
+      const profileIndex = profileId ? profiles.findIndex((profile) => profile.id === profileId) : -1;
+      if (profileIndex >= 0) {
+        const orbitIndex = Number(item?.dataset.orbitIndex ?? profileIndex);
+        tapHandledRef.current = true;
+        activateHomeProfile(profiles[profileIndex], Number.isFinite(orbitIndex) ? orbitIndex : profileIndex);
+      }
     }
     window.setTimeout(() => {
       dragStateRef.current = null;
+      tapHandledRef.current = false;
     }, 0);
-  }, [startOrbitMomentum]);
+  }, [activateHomeProfile, profiles, startOrbitMomentum]);
+
+  const handlePointerCancel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    stripRef.current?.releasePointerCapture?.(event.pointerId);
+    dragStateRef.current = null;
+    tapHandledRef.current = false;
+  }, []);
 
   if (profiles.length === 0) {
     return (
@@ -4311,7 +4345,7 @@ function ConnectionHome({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
       >
         {visibleProfiles.map((profile, index) => {
           const os = inferProfileOs(profile);
@@ -4320,22 +4354,18 @@ function ConnectionHome({
             <div
               role="button"
               tabIndex={-1}
+              data-profile-id={profile.id}
+              data-orbit-index={index}
               className={`profile-orbit-item ${os.tone} ${isSelected ? "selected" : ""}`}
               key={`${profile.id}-${index}`}
               title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}\n${profile.group ?? "未分组"}`}
               onClick={(event) => {
-                if (dragStateRef.current?.dragging) {
+                if (tapHandledRef.current || dragStateRef.current?.dragging) {
                   event.preventDefault();
                   return;
                 }
-                selectedIndexRef.current = profiles.findIndex((item) => item.id === profile.id);
-                highlightedOrbitIndexRef.current = index;
-                setSelectedIndex(selectedIndexRef.current);
-                setHighlightedOrbitIndex(index);
-                onSelect(profile);
-                homeRef.current?.focus();
+                activateHomeProfile(profile, index);
               }}
-              onDoubleClick={() => onConnect(profile)}
             >
               <span className="profile-orbit-icon">{os.label}</span>
               <small>{profile.host}</small>
@@ -4899,7 +4929,7 @@ function AppSettingsWorkspace({
     }
     setCropRequest({
       target: "splash",
-      title: "裁剪开机动画中心图",
+      title: "裁剪中心图",
       sourceUrl: await readImageFileAsDataUrl(file),
       aspectRatio: 1,
       outputWidth: 288,
@@ -4915,7 +4945,7 @@ function AppSettingsWorkspace({
     }
     setCropRequest({
       target: "terminal-background",
-      title: "裁剪 Shell 背景图片",
+      title: "裁剪背景图",
       sourceUrl: await readImageFileAsDataUrl(file),
       aspectRatio: 16 / 9,
       outputWidth: 1600,
@@ -4995,7 +5025,7 @@ function AppSettingsWorkspace({
                   </div>
                   <div>
                     <b>中心图案</b>
-                    <small>选择图片后会自动居中裁剪为圆形区域，应用到启动动画中心。</small>
+                    <small>裁剪为启动中心图。</small>
                   </div>
                   <div className="image-actions">
                     <button className="secondary-button" onClick={() => splashInputRef.current?.click()}>
@@ -5016,7 +5046,7 @@ function AppSettingsWorkspace({
                   </div>
                   <div>
                     <b>命令行背景图片</b>
-                    <small>图片会裁剪为适合工作区的比例，可控制不透明度和作用范围。</small>
+                    <small>裁剪后用于 Shell 或主页。</small>
                   </div>
                   <div className="image-actions">
                     <button className="secondary-button" onClick={() => backgroundInputRef.current?.click()}>
@@ -5273,6 +5303,11 @@ function ImageCropDialog({
             onPointerCancel={() => {
               dragRef.current = null;
             }}
+            onWheel={(event) => {
+              event.preventDefault();
+              const delta = event.deltaY < 0 ? 0.08 : -0.08;
+              setZoom((current) => clampNumber(Number((current + delta).toFixed(2)), 1, 3));
+            }}
           >
             {imageSize ? (
               <img
@@ -5302,7 +5337,7 @@ function ImageCropDialog({
             />
           </label>
           <p className="crop-hint">
-            拖动图片调整位置，使用辅助线对齐主体。确认后会按当前预览框比例裁剪保存。
+            拖动定位，滚轮缩放。
           </p>
         </div>
         <footer className="dialog-actions">
