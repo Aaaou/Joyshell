@@ -63,7 +63,8 @@ const defaultLayoutSettings: LayoutSettings = {
   last_left_sidebar_open: true,
   last_right_sidebar_open: true,
   last_bottom_panel_open: true,
-  use_icmp_latency_probe: false
+  use_icmp_latency_probe: false,
+  skip_delete_confirmations: false
 };
 
 export async function listProfiles(): Promise<SessionProfile[]> {
@@ -147,6 +148,18 @@ export async function deleteFolder(folderId: string): Promise<string | null> {
     }
   }
   return folder.name;
+}
+
+export async function deleteProfile(profileId: string): Promise<boolean> {
+  if (canUseTauri) {
+    return invoke("delete_profile", { profileId });
+  }
+  const existingIndex = demoProfiles.findIndex((item) => item.id === profileId);
+  if (existingIndex < 0) {
+    return false;
+  }
+  demoProfiles.splice(existingIndex, 1);
+  return true;
 }
 
 export async function listCommandSnippets(): Promise<CommandSnippet[]> {
@@ -383,6 +396,14 @@ export async function revealLocalPath(path: string): Promise<void> {
     return;
   }
   console.debug("preview reveal local path", path);
+}
+
+export async function deleteLocalFile(path: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("delete_local_file", { path });
+    return;
+  }
+  console.debug("preview delete local file", path);
 }
 
 export async function listAssistants(): Promise<AssistantDefinition[]> {

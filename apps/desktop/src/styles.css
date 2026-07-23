@@ -80,7 +80,7 @@
 }
 
 * {
-  scrollbar-color: rgba(31, 35, 40, 0.22) transparent;
+  scrollbar-color: rgba(31, 35, 40, 0.12) transparent;
   scrollbar-width: thin;
 }
 
@@ -96,12 +96,12 @@
 *::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: rgba(31, 35, 40, 0.24);
+  background: rgba(31, 35, 40, 0.12);
   background-clip: content-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(31, 35, 40, 0.34);
+  background-color: rgba(31, 35, 40, 0.2);
 }
 
 * {
@@ -739,8 +739,13 @@ button {
 
 .nav-section {
   display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .nav-section.compact {
@@ -751,19 +756,23 @@ button {
 
 .sidebar-footer {
   display: grid;
-  grid-template-columns: 24px 24px;
+  grid-template-columns: minmax(0, 1fr) 24px;
   align-items: center;
-  justify-content: start;
+  flex: 0 0 auto;
   gap: 7px;
   margin-top: auto;
-  min-height: 20px;
-  padding: 0 2px;
+  min-height: 30px;
+  padding: 3px 4px 3px 8px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: 0 10px 26px rgba(31, 35, 40, 0.08);
 }
 
 .app-settings-button {
-  display: grid;
-  place-items: center;
-  width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
   height: 24px;
   padding: 0;
   border: 0;
@@ -773,8 +782,27 @@ button {
   cursor: pointer;
 }
 
+.app-settings-button.primary {
+  justify-content: flex-start;
+  gap: 7px;
+  width: 100%;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.app-settings-button.update {
+  width: 24px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #ffffff;
+}
+
 .app-settings-button:hover {
   background: rgba(255, 255, 255, 0.58);
+}
+
+.app-settings-button.update:hover {
+  background: #0f6ae8;
 }
 
 .nav-section.compact button,
@@ -2618,6 +2646,14 @@ button {
 
 .context-menu button:hover:not(:disabled) {
   background: #f3f7fd;
+}
+
+.context-menu button.danger {
+  color: var(--danger);
+}
+
+.context-menu button.danger:hover:not(:disabled) {
+  background: rgba(216, 59, 59, 0.08);
 }
 
 .context-submenu {

@@ -118,6 +118,14 @@ fn delete_folder(state: State<'_, AppState>, folder_id: Uuid) -> Result<Option<S
 }
 
 #[tauri::command]
+fn delete_profile(state: State<'_, AppState>, profile_id: Uuid) -> Result<bool, String> {
+    state
+        .profiles
+        .delete_profile(profile_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_profile(
     state: State<'_, AppState>,
     payload: SaveProfilePayload,
@@ -611,6 +619,15 @@ fn reveal_local_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn delete_local_file(path: String) -> Result<(), String> {
+    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("local path is not a file".to_string());
+    }
+    std::fs::remove_file(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn list_assistants(state: State<'_, AppState>) -> Vec<joyshell_agent::AssistantDefinition> {
     state.assistants.list().to_vec()
 }
@@ -710,6 +727,7 @@ pub fn run() {
             list_folders,
             save_folder,
             delete_folder,
+            delete_profile,
             save_profile,
             list_command_snippets,
             save_command_snippet,
@@ -732,6 +750,7 @@ pub fn run() {
             sftp_upload_file,
             cancel_sftp_transfer,
             reveal_local_path,
+            delete_local_file,
             list_assistants,
             preview_agent_tool_call,
             build_agent_context,

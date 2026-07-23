@@ -35,6 +35,7 @@ export type LayoutSettings = {
   last_right_sidebar_open: boolean;
   last_bottom_panel_open: boolean;
   use_icmp_latency_probe: boolean;
+  skip_delete_confirmations: boolean;
 };
 
 export type SessionInfo = {

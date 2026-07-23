@@ -53,6 +53,8 @@ import {
   disconnectProfile,
   deleteCommandSnippet,
   deleteFolder,
+  deleteLocalFile,
+  deleteProfile,
   getLayoutSettings,
   listCommandSnippets,
   listFolders,
@@ -242,7 +244,8 @@ export function App() {
     last_left_sidebar_open: true,
     last_right_sidebar_open: true,
     last_bottom_panel_open: true,
-    use_icmp_latency_probe: false
+    use_icmp_latency_probe: false,
+    skip_delete_confirmations: false
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
@@ -1498,8 +1501,7 @@ export function App() {
       flash("请先选择远程文件或目录");
       return;
     }
-    const confirmed = window.confirm(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`);
-    if (!confirmed) {
+    if (!layoutSettings.skip_delete_confirmations && !window.confirm(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`)) {
       return;
     }
     setSftpBusy(true);
@@ -1514,7 +1516,7 @@ export function App() {
     } finally {
       setSftpBusy(false);
     }
-  }, [activeSession, flash, refreshSftpListing, selectedRemoteEntry, sftpPath]);
+  }, [activeSession, flash, layoutSettings.skip_delete_confirmations, refreshSftpListing, selectedRemoteEntry, sftpPath]);
 
   const uploadLocalPaths = useCallback(async (paths: string[]) => {
     if (!activeSession) {
@@ -1757,7 +1759,7 @@ export function App() {
 
   const deleteSessionFolder = useCallback(async (folder: SessionFolder) => {
     const affectedCount = profiles.filter((profile) => profile.group === folder.name).length;
-    const confirmed = window.confirm(
+    const confirmed = layoutSettings.skip_delete_confirmations || window.confirm(
       affectedCount > 0
         ? `删除文件夹“${folder.name}”？其中 ${affectedCount} 台服务器会移动到“独立服务器”，服务器不会被删除。`
         : `删除空文件夹“${folder.name}”？`
@@ -1782,7 +1784,31 @@ export function App() {
       setProfiles(previousProfiles);
       flash(`删除文件夹失败：${message}`);
     }
-  }, [flash, folders, profiles]);
+  }, [flash, folders, layoutSettings.skip_delete_confirmations, profiles]);
+
+  const deleteSessionProfile = useCallback(async (profile: SessionProfile) => {
+    if (!layoutSettings.skip_delete_confirmations && !window.confirm(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
+      return;
+    }
+    const previousProfiles = profiles;
+    const previousOpenIds = openProfileIds;
+    setProfiles((current) => current.filter((item) => item.id !== profile.id));
+    setOpenProfileIds((current) => current.filter((id) => id !== profile.id));
+    if (activeProfileId === profile.id) {
+      setActiveProfileId((current) => current === profile.id ? null : current);
+    }
+    terminalCacheRef.current[profile.id] = "";
+    try {
+      await disconnectProfile(profile.id).catch(() => undefined);
+      const deleted = await deleteProfile(profile.id);
+      flash(deleted ? `已删除服务器 ${profile.name}` : "服务器已不存在");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setProfiles(previousProfiles);
+      setOpenProfileIds(previousOpenIds);
+      flash(`删除服务器失败：${message}`);
+    }
+  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles]);
 
   const copyTerminalSelection = useCallback(async () => {
     const selected = terminalRef.current?.getSelection().trim();
@@ -1863,25 +1889,44 @@ export function App() {
     }
   }, [flash]);
 
-  const removeTransfer = useCallback((transferId: string) => {
-    setTransfers((current) => current.filter((transfer) => transfer.id !== transferId));
+  const removeTransfer = useCallback(async (transfer: SftpProgress, deleteLocal = false) => {
+    if (isTransferActive(transfer.status)) {
+      return;
+    }
+    if (!layoutSettings.skip_delete_confirmations) {
+      const action = deleteLocal ? "移除传输记录并删除本地文件" : "移除传输记录";
+      if (!window.confirm(`${action}：${remoteBasename(transfer.remote_path)}？`)) {
+        return;
+      }
+    }
+    if (deleteLocal && transfer.local_path) {
+      try {
+        await deleteLocalFile(transfer.local_path);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        flash(`删除本地文件失败：${message}`);
+        return;
+      }
+    }
+    setTransfers((current) => current.filter((item) => item.id !== transfer.id));
     setTransferStats((current) => {
-      if (!current[transferId]) {
+      if (!current[transfer.id]) {
         return current;
       }
       const next = { ...current };
-      delete next[transferId];
+      delete next[transfer.id];
       return next;
     });
     setCancellingTransfers((current) => {
-      if (!current[transferId]) {
+      if (!current[transfer.id]) {
         return current;
       }
       const next = { ...current };
-      delete next[transferId];
+      delete next[transfer.id];
       return next;
     });
-  }, []);
+    flash(deleteLocal ? "已移除记录并删除本地文件" : "已移除传输记录");
+  }, [flash, layoutSettings.skip_delete_confirmations, deleteLocalFile]);
 
   const retryTransfer = useCallback(async (transfer: SftpProgress) => {
     const session = sessions.find((item) => item.id === transfer.session_id && isConnectedState(item.state));
@@ -2304,11 +2349,12 @@ export function App() {
           </div>
 
           <div className="sidebar-footer">
-            <button className="app-settings-button" onClick={() => setAppSettingsOpen(true)} title="应用设置">
+            <button className="app-settings-button primary" onClick={() => setAppSettingsOpen(true)} title="应用设置">
               <Settings size={15} />
+              <span>custom</span>
             </button>
-            <button className="app-settings-button" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
-              <RefreshCw size={15} />
+            <button className="app-settings-button update" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
+              <Download size={13} />
             </button>
           </div>
         </aside>
@@ -2760,7 +2806,9 @@ export function App() {
                 <button onClick={() => { void createRemoteDirectory(); closeContextMenu(); }} disabled={!activeSession}>新建目录</button>
                 <button onClick={() => { void downloadRemoteEntry(); closeContextMenu(); }} disabled={!selectedRemoteEntry || selectedRemoteEntry.is_dir}>下载</button>
                 <button onClick={() => { startRemoteEntryRename(); closeContextMenu(); }} disabled={!selectedRemoteEntry}>重命名</button>
-                <button onClick={() => { void deleteRemoteEntry(); closeContextMenu(); }} disabled={!selectedRemoteEntry}>删除</button>
+                <button className="danger" onClick={() => { void deleteRemoteEntry(); closeContextMenu(); }} disabled={!selectedRemoteEntry}>
+                  <Trash2 size={14} /> 删除
+                </button>
               </>
             ) : contextMenu.kind === "folder" ? (
               <>
@@ -2770,7 +2818,7 @@ export function App() {
                 <button onClick={() => { if (contextFolder) { startSessionFolderRename(contextFolder); } closeContextMenu(); }} disabled={!contextFolder}>
                   <Edit3 size={14} /> 重命名文件夹
                 </button>
-                <button onClick={() => { if (contextFolder) { void deleteSessionFolder(contextFolder); } closeContextMenu(); }} disabled={!contextFolder}>
+                <button className="danger" onClick={() => { if (contextFolder) { void deleteSessionFolder(contextFolder); } closeContextMenu(); }} disabled={!contextFolder}>
                   <Trash2 size={14} /> 删除文件夹
                 </button>
               </>
@@ -2852,6 +2900,9 @@ export function App() {
                 <button onClick={() => { openNewProfileDialog(); closeContextMenu(); }}>
                   <Plus size={14} /> 新建服务器
                 </button>
+                <button className="danger" onClick={() => { if (contextProfile) { void deleteSessionProfile(contextProfile); } closeContextMenu(); }} disabled={!contextProfile}>
+                  <Trash2 size={14} /> 删除服务器
+                </button>
               </>
             ) : (
               <>
@@ -2870,8 +2921,11 @@ export function App() {
                 <button onClick={() => { if (contextTransfer) { void cancelTransfer(contextTransfer); } closeContextMenu(); }} disabled={!contextTransfer || !isTransferActive(contextTransfer.status) || Boolean(contextTransfer && cancellingTransfers[contextTransfer.id])}>
                   <X size={14} /> 取消任务
                 </button>
-                <button onClick={() => { if (contextTransfer) { removeTransfer(contextTransfer.id); } closeContextMenu(); }} disabled={!contextTransfer || isTransferActive(contextTransfer.status)}>
+                <button className="danger" onClick={() => { if (contextTransfer) { void removeTransfer(contextTransfer, false); } closeContextMenu(); }} disabled={!contextTransfer || isTransferActive(contextTransfer.status)}>
                   <Trash2 size={14} /> 移除记录
+                </button>
+                <button className="danger" onClick={() => { if (contextTransfer) { void removeTransfer(contextTransfer, true); } closeContextMenu(); }} disabled={!contextTransfer || isTransferActive(contextTransfer.status) || !contextTransfer.local_path}>
+                  <Trash2 size={14} /> 移除并删除本地文件
                 </button>
               </>
             )}
@@ -4443,6 +4497,20 @@ function AppSettingsDialog({
                     type="checkbox"
                     checked={layout.use_icmp_latency_probe}
                     onChange={(event) => onLayoutChange({ use_icmp_latency_probe: event.target.checked })}
+                  />
+                </label>
+              </section>
+              <section>
+                <strong>危险操作</strong>
+                <label className="settings-toggle-row">
+                  <span>
+                    <b>删除时不再二次确认</b>
+                    <small>默认关闭。开启后删除服务器、远程文件和传输记录将直接执行。</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={layout.skip_delete_confirmations}
+                    onChange={(event) => onLayoutChange({ skip_delete_confirmations: event.target.checked })}
                   />
                 </label>
               </section>

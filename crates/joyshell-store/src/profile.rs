@@ -38,6 +38,7 @@ pub struct LayoutSettings {
     pub last_right_sidebar_open: bool,
     pub last_bottom_panel_open: bool,
     pub use_icmp_latency_probe: bool,
+    pub skip_delete_confirmations: bool,
 }
 
 impl Default for LayoutSettings {
@@ -51,6 +52,7 @@ impl Default for LayoutSettings {
             last_right_sidebar_open: true,
             last_bottom_panel_open: true,
             use_icmp_latency_probe: false,
+            skip_delete_confirmations: false,
         }
     }
 }
@@ -212,6 +214,34 @@ impl ProfileRepository {
                         read_profile_row,
                     )
                     .optional()
+            }
+        }
+    }
+
+    pub fn delete_profile(&self, id: SessionId) -> rusqlite::Result<bool> {
+        match &self.storage {
+            ProfileStorage::Memory {
+                profiles, secrets, ..
+            } => {
+                let mut profiles = profiles.write();
+                let before = profiles.len();
+                profiles.retain(|profile| profile.id != id);
+                secrets
+                    .write()
+                    .retain(|(secret_ref, _)| !secret_ref.starts_with(&format!("secret://{id}/")));
+                Ok(profiles.len() != before)
+            }
+            ProfileStorage::Sqlite { connection } => {
+                let connection = connection.lock();
+                connection.execute(
+                    "delete from secret_values where secret_ref like ?1",
+                    params![format!("secret://{id}/%")],
+                )?;
+                let deleted = connection.execute(
+                    "delete from session_profiles where id = ?1",
+                    params![id.to_string()],
+                )?;
+                Ok(deleted > 0)
             }
         }
     }
@@ -470,7 +500,8 @@ impl ProfileRepository {
                                last_left_sidebar_open,
                                last_right_sidebar_open,
                                last_bottom_panel_open,
-                               use_icmp_latency_probe
+                               use_icmp_latency_probe,
+                               skip_delete_confirmations
                         from layout_settings
                         where id = 'default'
                         ",
@@ -485,6 +516,7 @@ impl ProfileRepository {
                                 last_right_sidebar_open: row.get(5)?,
                                 last_bottom_panel_open: row.get(6)?,
                                 use_icmp_latency_probe: row.get(7)?,
+                                skip_delete_confirmations: row.get(8)?,
                             })
                         },
                     )
@@ -516,9 +548,10 @@ impl ProfileRepository {
                         last_right_sidebar_open,
                         last_bottom_panel_open,
                         use_icmp_latency_probe,
+                        skip_delete_confirmations,
                         updated_at
                     )
-                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
                     on conflict(id) do update set
                         restore_last_layout = excluded.restore_last_layout,
                         default_left_sidebar_open = excluded.default_left_sidebar_open,
@@ -528,6 +561,7 @@ impl ProfileRepository {
                         last_right_sidebar_open = excluded.last_right_sidebar_open,
                         last_bottom_panel_open = excluded.last_bottom_panel_open,
                         use_icmp_latency_probe = excluded.use_icmp_latency_probe,
+                        skip_delete_confirmations = excluded.skip_delete_confirmations,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -539,6 +573,7 @@ impl ProfileRepository {
                         settings.last_right_sidebar_open,
                         settings.last_bottom_panel_open,
                         settings.use_icmp_latency_probe,
+                        settings.skip_delete_confirmations,
                     ],
                 )?;
                 Ok(settings)
@@ -608,6 +643,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             last_right_sidebar_open integer not null default 1,
             last_bottom_panel_open integer not null default 1,
             use_icmp_latency_probe integer not null default 0,
+            skip_delete_confirmations integer not null default 0,
             updated_at text not null default (datetime('now'))
         );
         ",
@@ -651,6 +687,11 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_layout_column(
         connection,
         "use_icmp_latency_probe",
+        "integer not null default 0",
+    )?;
+    ensure_layout_column(
+        connection,
+        "skip_delete_confirmations",
         "integer not null default 0",
     )?;
     ensure_table_column(
