@@ -36,6 +36,11 @@ export type LayoutSettings = {
   last_bottom_panel_open: boolean;
   use_icmp_latency_probe: boolean;
   skip_delete_confirmations: boolean;
+  splash_center_image_data_url?: string | null;
+  terminal_background_image_data_url?: string | null;
+  terminal_background_opacity: number;
+  terminal_background_apply_workspace: boolean;
+  terminal_background_apply_home: boolean;
 };
 
 export type SessionInfo = {

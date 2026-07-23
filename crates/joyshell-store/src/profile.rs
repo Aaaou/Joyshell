@@ -39,6 +39,11 @@ pub struct LayoutSettings {
     pub last_bottom_panel_open: bool,
     pub use_icmp_latency_probe: bool,
     pub skip_delete_confirmations: bool,
+    pub splash_center_image_data_url: Option<String>,
+    pub terminal_background_image_data_url: Option<String>,
+    pub terminal_background_opacity: u8,
+    pub terminal_background_apply_workspace: bool,
+    pub terminal_background_apply_home: bool,
 }
 
 impl Default for LayoutSettings {
@@ -53,6 +58,11 @@ impl Default for LayoutSettings {
             last_bottom_panel_open: true,
             use_icmp_latency_probe: false,
             skip_delete_confirmations: false,
+            splash_center_image_data_url: None,
+            terminal_background_image_data_url: None,
+            terminal_background_opacity: 28,
+            terminal_background_apply_workspace: true,
+            terminal_background_apply_home: false,
         }
     }
 }
@@ -501,7 +511,12 @@ impl ProfileRepository {
                                last_right_sidebar_open,
                                last_bottom_panel_open,
                                use_icmp_latency_probe,
-                               skip_delete_confirmations
+                               skip_delete_confirmations,
+                               splash_center_image_data_url,
+                               terminal_background_image_data_url,
+                               terminal_background_opacity,
+                               terminal_background_apply_workspace,
+                               terminal_background_apply_home
                         from layout_settings
                         where id = 'default'
                         ",
@@ -517,6 +532,11 @@ impl ProfileRepository {
                                 last_bottom_panel_open: row.get(6)?,
                                 use_icmp_latency_probe: row.get(7)?,
                                 skip_delete_confirmations: row.get(8)?,
+                                splash_center_image_data_url: row.get(9)?,
+                                terminal_background_image_data_url: row.get(10)?,
+                                terminal_background_opacity: row.get(11)?,
+                                terminal_background_apply_workspace: row.get(12)?,
+                                terminal_background_apply_home: row.get(13)?,
                             })
                         },
                     )
@@ -549,9 +569,14 @@ impl ProfileRepository {
                         last_bottom_panel_open,
                         use_icmp_latency_probe,
                         skip_delete_confirmations,
+                        splash_center_image_data_url,
+                        terminal_background_image_data_url,
+                        terminal_background_opacity,
+                        terminal_background_apply_workspace,
+                        terminal_background_apply_home,
                         updated_at
                     )
-                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
+                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
                     on conflict(id) do update set
                         restore_last_layout = excluded.restore_last_layout,
                         default_left_sidebar_open = excluded.default_left_sidebar_open,
@@ -562,6 +587,11 @@ impl ProfileRepository {
                         last_bottom_panel_open = excluded.last_bottom_panel_open,
                         use_icmp_latency_probe = excluded.use_icmp_latency_probe,
                         skip_delete_confirmations = excluded.skip_delete_confirmations,
+                        splash_center_image_data_url = excluded.splash_center_image_data_url,
+                        terminal_background_image_data_url = excluded.terminal_background_image_data_url,
+                        terminal_background_opacity = excluded.terminal_background_opacity,
+                        terminal_background_apply_workspace = excluded.terminal_background_apply_workspace,
+                        terminal_background_apply_home = excluded.terminal_background_apply_home,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -574,6 +604,11 @@ impl ProfileRepository {
                         settings.last_bottom_panel_open,
                         settings.use_icmp_latency_probe,
                         settings.skip_delete_confirmations,
+                        settings.splash_center_image_data_url,
+                        settings.terminal_background_image_data_url,
+                        settings.terminal_background_opacity,
+                        settings.terminal_background_apply_workspace,
+                        settings.terminal_background_apply_home,
                     ],
                 )?;
                 Ok(settings)
@@ -644,6 +679,11 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             last_bottom_panel_open integer not null default 1,
             use_icmp_latency_probe integer not null default 0,
             skip_delete_confirmations integer not null default 0,
+            splash_center_image_data_url text null,
+            terminal_background_image_data_url text null,
+            terminal_background_opacity integer not null default 28,
+            terminal_background_apply_workspace integer not null default 1,
+            terminal_background_apply_home integer not null default 0,
             updated_at text not null default (datetime('now'))
         );
         ",
@@ -692,6 +732,31 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_layout_column(
         connection,
         "skip_delete_confirmations",
+        "integer not null default 0",
+    )?;
+    ensure_layout_column(
+        connection,
+        "splash_center_image_data_url",
+        "text null",
+    )?;
+    ensure_layout_column(
+        connection,
+        "terminal_background_image_data_url",
+        "text null",
+    )?;
+    ensure_layout_column(
+        connection,
+        "terminal_background_opacity",
+        "integer not null default 28",
+    )?;
+    ensure_layout_column(
+        connection,
+        "terminal_background_apply_workspace",
+        "integer not null default 1",
+    )?;
+    ensure_layout_column(
+        connection,
+        "terminal_background_apply_home",
         "integer not null default 0",
     )?;
     ensure_table_column(

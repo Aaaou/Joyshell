@@ -64,7 +64,12 @@ const defaultLayoutSettings: LayoutSettings = {
   last_right_sidebar_open: true,
   last_bottom_panel_open: true,
   use_icmp_latency_probe: false,
-  skip_delete_confirmations: false
+  skip_delete_confirmations: false,
+  splash_center_image_data_url: null,
+  terminal_background_image_data_url: null,
+  terminal_background_opacity: 28,
+  terminal_background_apply_workspace: true,
+  terminal_background_apply_home: false
 };
 
 export async function listProfiles(): Promise<SessionProfile[]> {

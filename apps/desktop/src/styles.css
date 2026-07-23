@@ -340,7 +340,7 @@ button {
 }
 
 .app-shell.assistant-collapsed {
-  grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 48px;
+  grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 0;
 }
 
 .app-shell.settings-mode,
@@ -355,7 +355,7 @@ button {
 }
 
 .app-shell.sidebar-collapsed.assistant-collapsed {
-  grid-template-columns: 0 minmax(0, 1fr) 48px;
+  grid-template-columns: 0 minmax(0, 1fr) 0;
 }
 
 .app-shell.sidebar-collapsed.settings-mode,
@@ -375,6 +375,10 @@ button {
 
 .inspector {
   background: var(--surface);
+}
+
+.app-shell.assistant-collapsed .inspector {
+  display: none;
 }
 
 .left-chrome {
@@ -519,8 +523,8 @@ button {
 
 .settings-sidebar-item.active,
 .settings-sidebar-item:hover {
-  background: rgba(255, 255, 255, 0.56);
-  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.055);
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.032);
 }
 
 .settings-sidebar-item span {
@@ -664,7 +668,8 @@ button {
   padding: 9px;
   border: 0;
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.48);
+  background: rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(8px);
 }
 
 .status-line,
@@ -799,7 +804,8 @@ button {
   padding: 0 9px;
   border: 0;
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(8px);
   color: var(--muted);
 }
 
@@ -1304,6 +1310,33 @@ button {
   -webkit-app-region: no-drag;
 }
 
+.workspace-assistant-toggle {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 20;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(31, 35, 40, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: 0 8px 22px rgba(31, 35, 40, 0.08);
+  color: var(--text);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.workspace-assistant-toggle:hover {
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--accent);
+}
+
+.settings-mode .workspace-assistant-toggle {
+  display: none;
+}
+
 .sidebar-collapsed .terminal-region {
   border-radius: 0;
 }
@@ -1420,7 +1453,39 @@ button {
   background: var(--terminal-bg);
 }
 
+.has-workspace-bg .terminal-stage::before,
+.has-home-bg .connection-home::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  background-image: var(--joy-custom-background-image);
+  background-position: center;
+  background-size: cover;
+  opacity: var(--joy-custom-background-opacity, 0.28);
+}
+
+.has-workspace-bg .terminal-stage,
+.has-home-bg .connection-home {
+  isolation: isolate;
+}
+
+.has-workspace-bg .joy-terminal,
+.has-home-bg .connection-home > * {
+  position: relative;
+  z-index: 1;
+}
+
+.has-workspace-bg .terminal-stage,
+.has-workspace-bg .joy-terminal,
+.has-workspace-bg .joy-terminal .xterm-viewport,
+.has-workspace-bg .joy-terminal .xterm-screen {
+  background: transparent !important;
+}
+
 .connection-home {
+  position: relative;
   display: grid;
   width: 100%;
   min-height: 0;
@@ -3079,7 +3144,9 @@ button {
   gap: 10px;
   padding: 14px;
   border-radius: var(--radius-md);
-  background: var(--surface-panel);
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.035);
+  backdrop-filter: blur(8px);
 }
 
 .settings-toggle-row {
@@ -3135,6 +3202,69 @@ button {
 .appearance-swatch:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.image-personalization-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 82px;
+}
+
+.image-personalization-row b,
+.image-personalization-row small {
+  display: block;
+}
+
+.image-personalization-row small {
+  margin-top: 4px;
+  color: var(--muted-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.splash-center-preview,
+.terminal-background-preview {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 0 0 1px rgba(31, 35, 40, 0.06),
+    0 8px 22px rgba(31, 35, 40, 0.06);
+}
+
+.splash-center-preview {
+  width: 58px;
+  height: 58px;
+  border-radius: 999px;
+}
+
+.terminal-background-preview {
+  width: 86px;
+  height: 58px;
+  border-radius: 11px;
+  color: var(--muted-soft);
+  font-size: 11px;
+}
+
+.splash-center-preview img,
+.terminal-background-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.opacity-row input[type="range"] {
+  width: min(260px, 34vw);
+  accent-color: var(--accent);
 }
 
 .ssh-dialog {

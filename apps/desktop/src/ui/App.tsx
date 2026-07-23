@@ -148,6 +148,42 @@ function clamp01(value: number) {
   return Math.max(0, Math.min(1, value));
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function escapeCssUrl(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function cropImageFileToSquare(file: File, size: number) {
+  const sourceUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("无法读取图片"));
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取图片"));
+    reader.readAsDataURL(file);
+  });
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const imageElement = new Image();
+    imageElement.onload = () => resolve(imageElement);
+    imageElement.onerror = () => reject(new Error("无法解析图片"));
+    imageElement.src = sourceUrl;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("当前环境不支持图片裁剪");
+  }
+  const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+  const sourceX = (image.naturalWidth - sourceSize) / 2;
+  const sourceY = (image.naturalHeight - sourceSize) / 2;
+  context.clearRect(0, 0, size, size);
+  context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size);
+  return canvas.toDataURL("image/webp", 0.88);
+}
+
 type SystemDerivedStats = {
   cpuPercent: number | null;
   rxRate: number;
@@ -251,7 +287,12 @@ export function App() {
     last_right_sidebar_open: true,
     last_bottom_panel_open: true,
     use_icmp_latency_probe: false,
-    skip_delete_confirmations: false
+    skip_delete_confirmations: false,
+    splash_center_image_data_url: null,
+    terminal_background_image_data_url: null,
+    terminal_background_opacity: 28,
+    terminal_background_apply_workspace: true,
+    terminal_background_apply_home: false
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
@@ -2144,9 +2185,21 @@ export function App() {
     void getCurrentWindow().close();
   }, [flash]);
 
+  const splashCenterImageSrc = layoutSettings.splash_center_image_data_url || splashCenterImage;
+  const terminalBackgroundImage = layoutSettings.terminal_background_image_data_url;
+  const hasWorkspaceBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_workspace);
+  const hasHomeBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_home);
+  const appCustomStyle = {
+    "--joy-custom-background-image": terminalBackgroundImage ? `url("${escapeCssUrl(terminalBackgroundImage)}")` : "none",
+    "--joy-custom-background-opacity": String(clampNumber(layoutSettings.terminal_background_opacity, 0, 100) / 100)
+  } as React.CSSProperties;
+
   return (
-    <div className={`app-shell ${appSettingsOpen ? "settings-mode" : ""} ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}>
-      {splashVisible ? <JoyshellSplash closing={splashClosing} /> : null}
+    <div
+      className={`app-shell ${appSettingsOpen ? "settings-mode" : ""} ${hasWorkspaceBackground ? "has-workspace-bg" : ""} ${hasHomeBackground ? "has-home-bg" : ""} ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}
+      style={appCustomStyle}
+    >
+      {splashVisible ? <JoyshellSplash closing={splashClosing} centerImage={splashCenterImageSrc} /> : null}
       <div className="left-chrome">
         <header className="system-titlebar">
           <div className="titlebar-nav">
@@ -2189,6 +2242,7 @@ export function App() {
         </header>
 
         <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+          {!appSettingsOpen ? (
           <div className="status-card">
             <div className="status-line">
               <span className="status-title">运行模式</span>
@@ -2219,6 +2273,7 @@ export function App() {
               <span>{systemStatus}</span>
             </div>
           </div>
+          ) : null}
 
           {appSettingsOpen ? (
             <>
@@ -2474,6 +2529,13 @@ export function App() {
           className="terminal-region"
           onContextMenu={(event) => openAppContextMenu("terminal", event)}
         >
+          <button
+            className="workspace-assistant-toggle"
+            title={assistantOpen ? "收起右侧栏" : "展开右侧栏"}
+            onClick={() => setRightSidebarOpen(!assistantOpen)}
+          >
+            <PanelRight size={17} />
+          </button>
           <div
             className="terminal-tabs"
             onDragOver={(event) => {
@@ -2812,13 +2874,6 @@ export function App() {
 
       {!appSettingsOpen ? (
       <aside className="inspector" aria-label="AI assistant panel">
-        <button
-          className="drawer-toggle"
-          title={assistantOpen ? "Collapse assistant" : "Open assistant"}
-          onClick={() => setRightSidebarOpen(!assistantOpen)}
-        >
-          <PanelRight size={17} />
-        </button>
         <div className="drawer-rail" />
         <div className="drawer-content">
           <section className="panel transfer-panel">
@@ -4338,7 +4393,7 @@ function saveCollapsedSessionFolders(folderIds: Set<string>) {
   }
 }
 
-function JoyshellSplash({ closing }: { closing: boolean }) {
+function JoyshellSplash({ closing, centerImage }: { closing: boolean; centerImage: string }) {
   return (
     <div className={`splash-overlay ${closing ? "closing" : ""}`}>
       <div
@@ -4382,7 +4437,7 @@ function JoyshellSplash({ closing }: { closing: boolean }) {
           <circle cx="300" cy="300" r="103" className="inner-disc" />
           <image
             className="center-image"
-            href={splashCenterImage}
+            href={centerImage}
             x="228"
             y="228"
             width="144"
@@ -4844,6 +4899,32 @@ function AppSettingsWorkspace({
   layout: LayoutSettings;
   onLayoutChange: (patch: Partial<LayoutSettings>) => void;
 }) {
+  const splashInputRef = useRef<HTMLInputElement | null>(null);
+  const backgroundInputRef = useRef<HTMLInputElement | null>(null);
+
+  const chooseSplashImage = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    const dataUrl = await cropImageFileToSquare(file, 288);
+    onLayoutChange({ splash_center_image_data_url: dataUrl });
+  }, [onLayoutChange]);
+
+  const chooseTerminalBackground = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    const dataUrl = await cropImageFileToSquare(file, 1600);
+    onLayoutChange({
+      terminal_background_image_data_url: dataUrl,
+      terminal_background_apply_workspace: true
+    });
+  }, [onLayoutChange]);
+
   return (
         <div className="app-settings-content">
           <header>
@@ -4907,6 +4988,83 @@ function AppSettingsWorkspace({
                     Dark
                   </button>
                 </div>
+              </section>
+              <section>
+                <strong>开机动画</strong>
+                <div className="image-personalization-row">
+                  <div className="splash-center-preview">
+                    <img src={layout.splash_center_image_data_url || splashCenterImage} alt="" />
+                  </div>
+                  <div>
+                    <b>中心图案</b>
+                    <small>选择图片后会自动居中裁剪为圆形区域，应用到启动动画中心。</small>
+                  </div>
+                  <div className="image-actions">
+                    <button className="secondary-button" onClick={() => splashInputRef.current?.click()}>
+                      选择图片
+                    </button>
+                    <button className="secondary-button" onClick={() => onLayoutChange({ splash_center_image_data_url: null })}>
+                      恢复默认
+                    </button>
+                  </div>
+                  <input ref={splashInputRef} type="file" accept="image/*" hidden onChange={chooseSplashImage} />
+                </div>
+              </section>
+              <section>
+                <strong>Shell 背景</strong>
+                <div className="image-personalization-row background-row">
+                  <div className="terminal-background-preview">
+                    {layout.terminal_background_image_data_url ? <img src={layout.terminal_background_image_data_url} alt="" /> : <span>未设置</span>}
+                  </div>
+                  <div>
+                    <b>命令行背景图片</b>
+                    <small>图片会裁剪为适合工作区的比例，可控制不透明度和作用范围。</small>
+                  </div>
+                  <div className="image-actions">
+                    <button className="secondary-button" onClick={() => backgroundInputRef.current?.click()}>
+                      选择图片
+                    </button>
+                    <button className="secondary-button" onClick={() => onLayoutChange({ terminal_background_image_data_url: null })}>
+                      清除
+                    </button>
+                  </div>
+                  <input ref={backgroundInputRef} type="file" accept="image/*" hidden onChange={chooseTerminalBackground} />
+                </div>
+                <label className="settings-toggle-row opacity-row">
+                  <span>
+                    <b>背景不透明度</b>
+                    <small>{clampNumber(layout.terminal_background_opacity, 0, 100)}%</small>
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={80}
+                    value={clampNumber(layout.terminal_background_opacity, 0, 100)}
+                    onChange={(event) => onLayoutChange({ terminal_background_opacity: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="settings-toggle-row">
+                  <span>
+                    <b>改变 Shell 工作区</b>
+                    <small>打开服务器后的终端区域使用该背景。</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={layout.terminal_background_apply_workspace}
+                    onChange={(event) => onLayoutChange({ terminal_background_apply_workspace: event.target.checked })}
+                  />
+                </label>
+                <label className="settings-toggle-row">
+                  <span>
+                    <b>改变主页</b>
+                    <small>服务器滑动动画主页也使用该背景。</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={layout.terminal_background_apply_home}
+                    onChange={(event) => onLayoutChange({ terminal_background_apply_home: event.target.checked })}
+                  />
+                </label>
               </section>
               <section>
                 <strong>界面</strong>
