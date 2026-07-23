@@ -1508,6 +1508,12 @@ button {
 .app-shell:not(.home-mode).has-workspace-bg .terminal-region,
 .app-shell.home-mode.has-home-bg .terminal-region {
   isolation: isolate;
+  background: var(--terminal-bg) !important;
+}
+
+.app-shell:not(.home-mode).has-workspace-bg .workspace,
+.app-shell.home-mode.has-home-bg .workspace {
+  background: var(--terminal-bg) !important;
 }
 
 .app-shell:not(.home-mode).has-workspace-bg .terminal-tabs,
@@ -1522,14 +1528,11 @@ button {
   z-index: 1;
 }
 
-.app-shell:not(.home-mode).has-workspace-bg .terminal-region,
 .app-shell:not(.home-mode).has-workspace-bg .terminal-tabs,
 .app-shell:not(.home-mode).has-workspace-bg .terminal-stage,
 .app-shell:not(.home-mode).has-workspace-bg .joy-terminal,
 .app-shell:not(.home-mode).has-workspace-bg .joy-terminal .xterm-viewport,
 .app-shell:not(.home-mode).has-workspace-bg .joy-terminal .xterm-screen,
-.app-shell.home-mode.has-home-bg .workspace,
-.app-shell.home-mode.has-home-bg .terminal-region,
 .app-shell.home-mode.has-home-bg .terminal-stage,
 .app-shell.home-mode.has-home-bg .connection-home {
   background: transparent !important;
