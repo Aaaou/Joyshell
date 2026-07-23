@@ -255,6 +255,7 @@ export function App() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [appSettingsPage, setAppSettingsPage] = useState<"general" | "appearance">("general");
   const [systemDialogOpen, setSystemDialogOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<SessionProfile | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2144,7 +2145,7 @@ export function App() {
   }, [flash]);
 
   return (
-    <div className={`app-shell ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}>
+    <div className={`app-shell ${appSettingsOpen ? "settings-mode" : ""} ${assistantOpen ? "assistant-open" : "assistant-collapsed"} ${sidebarCollapsed ? "sidebar-collapsed" : "sidebar-open"}`}>
       {splashVisible ? <JoyshellSplash closing={splashClosing} /> : null}
       <div className="left-chrome">
         <header className="system-titlebar">
@@ -2219,6 +2220,48 @@ export function App() {
             </div>
           </div>
 
+          {appSettingsOpen ? (
+            <>
+              <div className="settings-sidebar-header">
+                <strong>设置</strong>
+                <button className="tiny-action" title="返回会话" onClick={() => setAppSettingsOpen(false)}>
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="settings-sidebar-list">
+                <button
+                  className={`settings-sidebar-item ${appSettingsPage === "general" ? "active" : ""}`}
+                  onClick={() => setAppSettingsPage("general")}
+                >
+                  <Settings size={15} />
+                  <span>
+                    <strong>常规</strong>
+                    <small>启动、删除确认和基础行为</small>
+                  </span>
+                </button>
+                <button
+                  className={`settings-sidebar-item ${appSettingsPage === "appearance" ? "active" : ""}`}
+                  onClick={() => setAppSettingsPage("appearance")}
+                >
+                  <Palette size={15} />
+                  <span>
+                    <strong>外观</strong>
+                    <small>侧栏、面板和主题偏好</small>
+                  </span>
+                </button>
+              </div>
+              <div className="sidebar-footer plain">
+                <button className="app-settings-button primary" onClick={() => setAppSettingsOpen(false)} title="返回会话">
+                  <ChevronRight className="back-icon" size={15} />
+                  <span>sessions</span>
+                </button>
+                <button className="app-settings-button update" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
+                  <Download size={13} />
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
           <label className="search-box">
             <Search size={15} />
             <input
@@ -2397,9 +2440,35 @@ export function App() {
               <Download size={13} />
             </button>
           </div>
+            </>
+          )}
         </aside>
       </div>
 
+      {appSettingsOpen ? (
+        <main className="workspace settings-workspace">
+          <AppSettingsWorkspace
+            activePage={appSettingsPage}
+            layout={layoutSettings}
+            onLayoutChange={(patch) => {
+              const nextPatch = patch.restore_last_layout
+                ? {
+                    ...patch,
+                    last_left_sidebar_open: !sidebarCollapsed,
+                    last_right_sidebar_open: assistantOpen,
+                    last_bottom_panel_open: bottomPanelOpen
+                  }
+                : patch;
+              const next = { ...layoutSettings, ...nextPatch };
+              setLayoutSettings(next);
+              void saveLayoutSettings(next).catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                flash(`保存设置失败：${message}`);
+              });
+            }}
+          />
+        </main>
+      ) : (
           <main className={`workspace ${!activeProfile ? "home-mode" : ""}`}>
         <section
           className="terminal-region"
@@ -2739,7 +2808,9 @@ export function App() {
           </section>
         ) : null}
       </main>
+      )}
 
+      {!appSettingsOpen ? (
       <aside className="inspector" aria-label="AI assistant panel">
         <button
           className="drawer-toggle"
@@ -2806,6 +2877,7 @@ export function App() {
           </section>
         </div>
       </aside>
+      ) : null}
 
       {contextMenu ? (
         <div className="context-menu-backdrop" onMouseDown={closeContextMenu}>
@@ -2982,23 +3054,6 @@ export function App() {
       ) : null}
 
       {notice ? <div className="toast">{notice}</div> : null}
-      {appSettingsOpen ? (
-        <AppSettingsDialog
-          layout={layoutSettings}
-          onLayoutChange={(patch) => {
-            const nextPatch = patch.restore_last_layout
-              ? {
-                  ...patch,
-                  last_left_sidebar_open: !sidebarCollapsed,
-                  last_right_sidebar_open: assistantOpen,
-                  last_bottom_panel_open: bottomPanelOpen
-                }
-              : patch;
-            saveLayoutPreference(nextPatch);
-          }}
-          onClose={() => setAppSettingsOpen(false)}
-        />
-      ) : null}
       {systemDialogOpen ? (
         <SystemInfoDialog
           activeProfile={activeProfile}
@@ -4632,7 +4687,7 @@ function DangerConfirmDialog({
         <footer className="danger-confirm-actions">
           <button className="secondary-button" onClick={onCancel}>取消</button>
           <button className="danger-confirm-button" onClick={onConfirm}>
-            <Trash2 size={14} /> 确认删除
+            <Trash2 size={14} /> 删除
           </button>
         </footer>
       </section>
@@ -4780,51 +4835,19 @@ function CommandLibraryPanel({
   );
 }
 
-function AppSettingsDialog({
+function AppSettingsWorkspace({
+  activePage,
   layout,
-  onLayoutChange,
-  onClose
+  onLayoutChange
 }: {
+  activePage: "general" | "appearance";
   layout: LayoutSettings;
   onLayoutChange: (patch: Partial<LayoutSettings>) => void;
-  onClose: () => void;
 }) {
-  const [activePage, setActivePage] = useState<"general" | "appearance">("general");
-
   return (
-    <div className="modal-backdrop app-settings-backdrop" role="presentation">
-      <section className="app-settings-dialog" role="dialog" aria-modal="true" aria-label="应用设置">
-        <aside className="app-settings-sidebar">
-          <button className="settings-back-button" onClick={onClose}>
-            <ChevronRight size={15} />
-            返回应用
-          </button>
-          <label className="settings-search">
-            <Search size={15} />
-            <input placeholder="搜索设置..." />
-          </label>
-          <span className="settings-group-label">个人</span>
-          <button
-            className={`app-settings-node ${activePage === "general" ? "active" : ""}`}
-            onClick={() => setActivePage("general")}
-          >
-            <Settings size={15} />
-            常规
-          </button>
-          <button
-            className={`app-settings-node ${activePage === "appearance" ? "active" : ""}`}
-            onClick={() => setActivePage("appearance")}
-          >
-            <Palette size={15} />
-            外观
-          </button>
-        </aside>
-        <main className="app-settings-content">
+        <div className="app-settings-content">
           <header>
             <span>{activePage === "general" ? "常规" : "外观"}</span>
-            <button className="dialog-close" onClick={onClose} title="关闭">
-              <X size={16} />
-            </button>
           </header>
           {activePage === "general" ? (
             <div className="settings-page">
@@ -4944,9 +4967,7 @@ function AppSettingsDialog({
               </section>
             </div>
           )}
-        </main>
-      </section>
-    </div>
+        </div>
   );
 }
 

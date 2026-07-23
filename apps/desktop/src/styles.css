@@ -343,6 +343,11 @@ button {
   grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 48px;
 }
 
+.app-shell.settings-mode,
+.app-shell.settings-mode.assistant-collapsed {
+  grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr) 0;
+}
+
 .app-shell.sidebar-collapsed {
   --chrome-left-clip-width: 0px;
   --sidebar-rail-width: 0px;
@@ -351,6 +356,11 @@ button {
 
 .app-shell.sidebar-collapsed.assistant-collapsed {
   grid-template-columns: 0 minmax(0, 1fr) 48px;
+}
+
+.app-shell.sidebar-collapsed.settings-mode,
+.app-shell.sidebar-collapsed.settings-mode.assistant-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
 }
 
 .left-chrome,
@@ -463,8 +473,72 @@ button {
 .sidebar.collapsed .status-card,
 .sidebar.collapsed .search-box,
 .sidebar.collapsed .nav-section,
-.sidebar.collapsed .sidebar-footer {
+.sidebar.collapsed .sidebar-footer,
+.sidebar.collapsed .settings-sidebar-header,
+.sidebar.collapsed .settings-sidebar-list {
   display: none;
+}
+
+.settings-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 0;
+}
+
+.settings-sidebar-header strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-sidebar-list {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.settings-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-sidebar-item.active,
+.settings-sidebar-item:hover {
+  background: rgba(255, 255, 255, 0.56);
+  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.055);
+}
+
+.settings-sidebar-item span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-sidebar-item strong,
+.settings-sidebar-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-sidebar-item small {
+  color: var(--muted-soft);
+  font-size: 10px;
 }
 
 .titlebar-nav {
@@ -773,13 +847,8 @@ button {
 }
 
 .sidebar-footer::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  content: "";
-  background: rgba(255, 255, 255, 0.46);
-  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.055);
+  display: none;
+  content: none;
 }
 
 .app-settings-button {
@@ -1131,6 +1200,41 @@ button {
   background: transparent;
   border-radius: 0;
   overflow: hidden;
+}
+
+.settings-mode .workspace {
+  grid-column: 2 / 4;
+}
+
+.settings-workspace {
+  background: var(--terminal-bg);
+}
+
+.settings-workspace .app-settings-content {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(31, 35, 40, 0.06);
+  border-radius: 18px 0 0 0;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.settings-workspace .app-settings-content header {
+  min-height: 54px;
+  padding: 0 24px;
+  border-bottom: 1px solid rgba(31, 35, 40, 0.08);
+}
+
+.settings-workspace .settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px 30px;
 }
 
 .icon-button,
@@ -2829,8 +2933,8 @@ button {
 }
 
 .danger-confirm-actions {
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   padding: 12px 16px 14px;
   border-top: 1px solid rgba(31, 35, 40, 0.08);
@@ -2839,7 +2943,8 @@ button {
 
 .danger-confirm-actions .secondary-button,
 .danger-confirm-button {
-  min-height: 32px;
+  width: 100%;
+  min-height: 34px;
   padding: 0 13px;
   border-radius: 9px;
   font-size: 12px;
@@ -2848,6 +2953,7 @@ button {
 .danger-confirm-button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   border: 0;
   background: var(--danger);
