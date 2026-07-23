@@ -820,8 +820,8 @@ export function App() {
         const value = await measureLatency(
           target.host,
           target.port,
-          layoutSettings.use_icmp_latency_probe
-        );
+            false
+          );
         if (cancelled) {
           return;
         }
@@ -847,11 +847,8 @@ export function App() {
   }, [
     activeProfile?.host,
     activeProfile?.port,
-    activeProfile?.latency_probe_host,
-    activeProfile?.latency_probe_port,
     activeProfile?.use_terminal_latency_probe,
-    activeSession?.id,
-    layoutSettings.use_icmp_latency_probe
+    activeSession?.id
   ]);
 
   const flash = useCallback((message: string) => {
@@ -2191,9 +2188,6 @@ export function App() {
           <div className="nav-section">
             <div className="section-title-row">
               <span className="section-title">Sessions</span>
-              <button className="tiny-action" title="新建服务器或文件夹" onClick={openCreateContextMenu}>
-                <Plus size={14} />
-              </button>
             </div>
             {profiles.length === 0 ? (
               <button className="empty-session" onClick={openNewProfileDialog}>
@@ -2360,7 +2354,7 @@ export function App() {
         </aside>
       </div>
 
-      <main className={`workspace ${!activeProfile ? "home-mode" : ""}`}>
+          <main className={`workspace ${!activeProfile ? "home-mode" : ""}`}>
         <section
           className="terminal-region"
           onContextMenu={(event) => openAppContextMenu("terminal", event)}
@@ -3566,9 +3560,7 @@ function resolveLatencyTarget(profile: SessionProfile | undefined) {
   if (!profile?.host || !profile.port) {
     return null;
   }
-  const host = profile.latency_probe_host?.trim() || profile.host;
-  const port = profile.latency_probe_port || profile.port;
-  return { host, port };
+  return { host: profile.host, port: profile.port };
 }
 
 function shouldSkipActiveLatencyProbe(
@@ -3882,6 +3874,38 @@ function ConnectionHome({
   onSelect: (profile: SessionProfile) => void;
   onConnect: (profile: SessionProfile) => void;
 }) {
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const loopPad = profiles.length > 3 ? Math.min(3, profiles.length) : 0;
+  const visibleProfiles = loopPad
+    ? [
+        ...profiles.slice(-loopPad),
+        ...profiles,
+        ...profiles.slice(0, loopPad)
+      ]
+    : profiles;
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (!strip || !loopPad) {
+      return;
+    }
+    strip.scrollLeft = loopPad * 112;
+  }, [loopPad, profiles.length]);
+
+  const handleLoopScroll = useCallback(() => {
+    const strip = stripRef.current;
+    if (!strip || !loopPad) {
+      return;
+    }
+    const itemWidth = 112;
+    const loopWidth = profiles.length * itemWidth;
+    if (strip.scrollLeft < itemWidth) {
+      strip.scrollLeft += loopWidth;
+    } else if (strip.scrollLeft > strip.scrollWidth - strip.clientWidth - itemWidth) {
+      strip.scrollLeft -= loopWidth;
+    }
+  }, [loopPad, profiles.length]);
+
   if (profiles.length === 0) {
     return (
       <div className="connection-home empty">
@@ -3901,13 +3925,16 @@ function ConnectionHome({
 
   return (
     <div className="connection-home">
-      <div className="profile-orbit-strip" aria-label="服务器快捷入口">
-        {profiles.map((profile) => {
+      <button className="connection-home-add" title="添加服务器" onClick={onAdd}>
+        <Plus size={24} />
+      </button>
+      <div ref={stripRef} className="profile-orbit-strip" aria-label="服务器快捷入口" onScroll={handleLoopScroll}>
+        {visibleProfiles.map((profile, index) => {
           const os = inferProfileOs(profile);
           return (
             <button
               className={`profile-orbit-item ${os.tone}`}
-              key={profile.id}
+              key={`${profile.id}-${index}`}
               title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}\n${profile.group ?? "未分组"}`}
               onClick={() => onSelect(profile)}
               onDoubleClick={() => onConnect(profile)}
@@ -3917,10 +3944,6 @@ function ConnectionHome({
             </button>
           );
         })}
-        <button className="profile-orbit-item add" title="添加服务器" onClick={onAdd}>
-          <Plus size={22} />
-          <small>New</small>
-        </button>
       </div>
     </div>
   );
@@ -4487,20 +4510,6 @@ function AppSettingsDialog({
                 </label>
               </section>
               <section>
-                <strong>网络</strong>
-                <label className="settings-toggle-row">
-                  <span>
-                    <b>使用 ICMP 探测</b>
-                    <small>关闭时测 TCP 端口连通时延；开启后 ping 服务器配置里的时延主机。</small>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={layout.use_icmp_latency_probe}
-                    onChange={(event) => onLayoutChange({ use_icmp_latency_probe: event.target.checked })}
-                  />
-                </label>
-              </section>
-              <section>
                 <strong>危险操作</strong>
                 <label className="settings-toggle-row">
                   <span>
@@ -4715,28 +4724,6 @@ function SshSettingsDialog({
 
             <fieldset>
               <legend>高级</legend>
-              <label>
-                <span>时延主机:</span>
-                <input
-                  value={draft.latency_probe_host ?? ""}
-                  onChange={(event) => update("latency_probe_host", event.target.value)}
-                  placeholder="留空则使用 SSH 主机；隧道可填真实域名/IP"
-                />
-              </label>
-              <label>
-                <span>时延端口:</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={draft.latency_probe_port ?? ""}
-                  onChange={(event) => {
-                    const value = event.target.value.trim();
-                    update("latency_probe_port", value ? Number(value) : null);
-                  }}
-                  placeholder="留空则使用 SSH 端口"
-                />
-              </label>
               <label className="check-row">
                 <input
                   type="checkbox"
@@ -4770,10 +4757,6 @@ function SshSettingsDialog({
                 setError("端口必须在 1 到 65535 之间");
                 return;
               }
-              if (draft.latency_probe_port && (draft.latency_probe_port < 1 || draft.latency_probe_port > 65535)) {
-                setError("时延端口必须在 1 到 65535 之间");
-                return;
-              }
               if (authMethod !== "password") {
                 setError("初版后端当前只接入密码认证，请先选择密码方式");
                 return;
@@ -4782,8 +4765,8 @@ function SshSettingsDialog({
                 ...draft,
                 name: draft.name.trim(),
                 host: draft.host.trim(),
-                latency_probe_host: draft.latency_probe_host?.trim() || null,
-                latency_probe_port: draft.latency_probe_port || null,
+                latency_probe_host: null,
+                latency_probe_port: null,
                 use_terminal_latency_probe: Boolean(draft.use_terminal_latency_probe),
                 username: draft.username.trim(),
                 group: draft.group?.trim() || null,

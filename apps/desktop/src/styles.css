@@ -761,11 +761,13 @@ button {
   flex: 0 0 auto;
   gap: 7px;
   margin-top: auto;
-  min-height: 30px;
-  padding: 3px 4px 3px 8px;
+  width: 136px;
+  max-width: calc(100% - 8px);
+  min-height: 28px;
+  padding: 2px 4px 2px 8px;
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.46);
-  box-shadow: 0 10px 26px rgba(31, 35, 40, 0.08);
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.055);
 }
 
 .app-settings-button {
@@ -1306,8 +1308,10 @@ button {
   display: grid;
   width: 100%;
   min-height: 0;
-  place-items: center;
-  padding: 36px;
+  align-content: center;
+  justify-items: center;
+  gap: 28px;
+  padding: 24px 36px 36px;
   background: var(--terminal-bg);
 }
 
@@ -1343,6 +1347,30 @@ button {
   box-shadow: 0 8px 28px rgba(31, 35, 40, 0.08);
 }
 
+.connection-home-add {
+  display: grid;
+  place-items: center;
+  width: 74px;
+  height: 74px;
+  border: 0;
+  border-radius: 24px;
+  background: #ffffff;
+  color: var(--accent);
+  box-shadow:
+    inset 0 0 0 1px rgba(31, 35, 40, 0.055),
+    0 14px 38px rgba(31, 35, 40, 0.08);
+  cursor: pointer;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.connection-home-add:hover,
+.connection-home-add:focus-visible {
+  transform: translateY(-3px);
+  box-shadow:
+    inset 0 0 0 1px rgba(22, 119, 255, 0.18),
+    0 18px 44px rgba(31, 35, 40, 0.12);
+}
+
 .profile-orbit-strip {
   display: flex;
   width: min(760px, calc(100vw - 560px));
@@ -1351,7 +1379,11 @@ button {
   overflow-x: auto;
   overflow-y: hidden;
   padding: 14px 6px 22px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.profile-orbit-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .profile-orbit-item {
@@ -1418,10 +1450,6 @@ button {
 
 .profile-orbit-item.linux .profile-orbit-icon {
   color: #1f8f55;
-}
-
-.profile-orbit-item.add {
-  color: var(--accent);
 }
 
 .joy-terminal {
