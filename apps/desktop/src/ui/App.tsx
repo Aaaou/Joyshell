@@ -1784,7 +1784,7 @@ export function App() {
   }, [flash, folders, layoutSettings.skip_delete_confirmations, profiles]);
 
   const deleteSessionProfile = useCallback(async (profile: SessionProfile) => {
-    if (!layoutSettings.skip_delete_confirmations && !window.confirm(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
+    if (!window.confirm(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
       return;
     }
     const previousProfiles = profiles;
@@ -1805,7 +1805,7 @@ export function App() {
       setOpenProfileIds(previousOpenIds);
       flash(`删除服务器失败：${message}`);
     }
-  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles]);
+  }, [activeProfileId, flash, openProfileIds, profiles]);
 
   const copyTerminalSelection = useCallback(async () => {
     const selected = terminalRef.current?.getSelection().trim();
@@ -2188,6 +2188,9 @@ export function App() {
           <div className="nav-section">
             <div className="section-title-row">
               <span className="section-title">Sessions</span>
+              <button className="tiny-action" title="新建服务器或文件夹" onClick={openCreateContextMenu}>
+                <Plus size={14} />
+              </button>
             </div>
             {profiles.length === 0 ? (
               <button className="empty-session" onClick={openNewProfileDialog}>
@@ -2445,16 +2448,14 @@ export function App() {
               );
             })}
             {dragIndicator?.kind === "tab" && !dragIndicator.targetId ? <div className="tab-drop-marker after" /> : null}
-            <button className="tab add-tab" onClick={openNewProfileDialog}>
-              <Plus size={16} />
-            </button>
           </div>
           <div className="terminal-stage">
             {!activeProfile ? (
               <ConnectionHome
                 profiles={profiles}
                 onAdd={openNewProfileDialog}
-                onSelect={(profile) => setActiveProfileId(profile.id)}
+                activeProfileId={activeProfileId}
+                onSelect={(profile) => openShellProfile(profile.id)}
                 onConnect={(profile) => void connectSelectedProfile(profile)}
               />
             ) : (
@@ -3865,16 +3866,20 @@ function inferProfileOs(profile: SessionProfile) {
 
 function ConnectionHome({
   profiles,
+  activeProfileId,
   onAdd,
   onSelect,
   onConnect
 }: {
   profiles: SessionProfile[];
+  activeProfileId: string | null;
   onAdd: () => void;
   onSelect: (profile: SessionProfile) => void;
   onConnect: (profile: SessionProfile) => void;
 }) {
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState(() => Math.max(0, profiles.findIndex((profile) => profile.id === activeProfileId)));
+  const dragStateRef = useRef<{ startX: number; scrollLeft: number; dragging: boolean } | null>(null);
   const loopPad = profiles.length > 3 ? Math.min(3, profiles.length) : 0;
   const visibleProfiles = loopPad
     ? [
@@ -3892,6 +3897,13 @@ function ConnectionHome({
     strip.scrollLeft = loopPad * 112;
   }, [loopPad, profiles.length]);
 
+  useEffect(() => {
+    const nextIndex = profiles.findIndex((profile) => profile.id === activeProfileId);
+    if (nextIndex >= 0) {
+      setSelectedIndex(nextIndex);
+    }
+  }, [activeProfileId, profiles]);
+
   const handleLoopScroll = useCallback(() => {
     const strip = stripRef.current;
     if (!strip || !loopPad) {
@@ -3905,6 +3917,60 @@ function ConnectionHome({
       strip.scrollLeft -= loopWidth;
     }
   }, [loopPad, profiles.length]);
+
+  const selectProfileAt = useCallback((index: number) => {
+    if (profiles.length === 0) {
+      return;
+    }
+    const normalized = ((index % profiles.length) + profiles.length) % profiles.length;
+    setSelectedIndex(normalized);
+    onSelect(profiles[normalized]);
+  }, [onSelect, profiles]);
+
+  const handleHomeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      selectProfileAt(selectedIndex - 1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      selectProfileAt(selectedIndex + 1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const profile = profiles[selectedIndex];
+      if (profile) {
+        onConnect(profile);
+      }
+    }
+  }, [onConnect, profiles, selectProfileAt, selectedIndex]);
+
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const strip = stripRef.current;
+    if (!strip) {
+      return;
+    }
+    dragStateRef.current = { startX: event.clientX, scrollLeft: strip.scrollLeft, dragging: false };
+    strip.setPointerCapture?.(event.pointerId);
+  }, []);
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const strip = stripRef.current;
+    const state = dragStateRef.current;
+    if (!strip || !state) {
+      return;
+    }
+    const delta = event.clientX - state.startX;
+    if (Math.abs(delta) > 3) {
+      state.dragging = true;
+    }
+    strip.scrollLeft = state.scrollLeft - delta;
+  }, []);
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    stripRef.current?.releasePointerCapture?.(event.pointerId);
+    window.setTimeout(() => {
+      dragStateRef.current = null;
+    }, 0);
+  }, []);
 
   if (profiles.length === 0) {
     return (
@@ -3924,19 +3990,39 @@ function ConnectionHome({
   }
 
   return (
-    <div className="connection-home">
+    <div className="connection-home" tabIndex={0} onKeyDown={handleHomeKeyDown}>
       <button className="connection-home-add" title="添加服务器" onClick={onAdd}>
         <Plus size={24} />
       </button>
-      <div ref={stripRef} className="profile-orbit-strip" aria-label="服务器快捷入口" onScroll={handleLoopScroll}>
+      <div
+        ref={stripRef}
+        className="profile-orbit-strip"
+        aria-label="服务器快捷入口"
+        onScroll={handleLoopScroll}
+        onWheel={(event) => {
+          event.currentTarget.scrollLeft += event.deltaY || event.deltaX;
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      >
         {visibleProfiles.map((profile, index) => {
           const os = inferProfileOs(profile);
+          const isSelected = profiles[selectedIndex]?.id === profile.id;
           return (
             <button
-              className={`profile-orbit-item ${os.tone}`}
+              className={`profile-orbit-item ${os.tone} ${isSelected ? "selected" : ""}`}
               key={`${profile.id}-${index}`}
               title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}\n${profile.group ?? "未分组"}`}
-              onClick={() => onSelect(profile)}
+              onClick={(event) => {
+                if (dragStateRef.current?.dragging) {
+                  event.preventDefault();
+                  return;
+                }
+                setSelectedIndex(profiles.findIndex((item) => item.id === profile.id));
+                onSelect(profile);
+              }}
               onDoubleClick={() => onConnect(profile)}
             >
               <span className="profile-orbit-icon">{os.label}</span>
