@@ -8,7 +8,7 @@ import {
   type PhysicalPosition,
   type PhysicalSize
 } from "@tauri-apps/api/window";
-import { confirm as confirmDialog, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import splashCenterImage from "../assets/splash/center-joy-cropped.png";
@@ -42,6 +42,7 @@ import {
   Square,
   Star,
   Trash2,
+  TriangleAlert,
   Upload,
   X
 } from "lucide-react";
@@ -198,6 +199,11 @@ type ContextMenuState = {
   folderId?: string;
 };
 
+type DangerConfirmState = {
+  title: string;
+  message: string;
+};
+
 type PointerDragState = {
   kind: "profile" | "tab";
   id: string;
@@ -281,6 +287,7 @@ export function App() {
   const [cancellingTransfers, setCancellingTransfers] = useState<Record<string, boolean>>({});
   const [sftpDropActive, setSftpDropActive] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
   const [editingRemotePath, setEditingRemotePath] = useState<string | null>(null);
@@ -298,6 +305,8 @@ export function App() {
   const systemSyncFailureCountRef = useRef(0);
   const draggedProfileIdRef = useRef<string | null>(null);
   const draggedTabProfileIdRef = useRef<string | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const dangerConfirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const dragIndicatorRef = useRef<DragIndicator | null>(null);
   const suppressNextClickRef = useRef(false);
@@ -1493,12 +1502,24 @@ export function App() {
     }
   }, [activeSession, cancelRemoteEntryRename, flash, refreshSftpListing, sftpPath]);
 
+  const requestDangerConfirmation = useCallback((message: string, title = "确认删除") => new Promise<boolean>((resolve) => {
+    dangerConfirmResolverRef.current?.(false);
+    dangerConfirmResolverRef.current = resolve;
+    setDangerConfirm({ title, message });
+  }), []);
+
+  const closeDangerConfirmation = useCallback((confirmed: boolean) => {
+    dangerConfirmResolverRef.current?.(confirmed);
+    dangerConfirmResolverRef.current = null;
+    setDangerConfirm(null);
+  }, []);
+
   const deleteRemoteEntry = useCallback(async () => {
     if (!activeSession || !selectedRemoteEntry) {
       flash("请先选择远程文件或目录");
       return;
     }
-    if (!layoutSettings.skip_delete_confirmations && !await confirmDangerAction(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`)) {
+    if (!layoutSettings.skip_delete_confirmations && !await requestDangerConfirmation(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`)) {
       return;
     }
     setSftpBusy(true);
@@ -1513,7 +1534,7 @@ export function App() {
     } finally {
       setSftpBusy(false);
     }
-  }, [activeSession, flash, layoutSettings.skip_delete_confirmations, refreshSftpListing, selectedRemoteEntry, sftpPath]);
+  }, [activeSession, flash, layoutSettings.skip_delete_confirmations, refreshSftpListing, requestDangerConfirmation, selectedRemoteEntry, sftpPath]);
 
   const uploadLocalPaths = useCallback(async (paths: string[]) => {
     if (!activeSession) {
@@ -1756,7 +1777,7 @@ export function App() {
 
   const deleteSessionFolder = useCallback(async (folder: SessionFolder) => {
     const affectedCount = profiles.filter((profile) => profile.group === folder.name).length;
-    const confirmed = layoutSettings.skip_delete_confirmations || await confirmDangerAction(
+    const confirmed = layoutSettings.skip_delete_confirmations || await requestDangerConfirmation(
       affectedCount > 0
         ? `删除文件夹“${folder.name}”？其中 ${affectedCount} 台服务器会移动到“独立服务器”，服务器不会被删除。`
         : `删除空文件夹“${folder.name}”？`
@@ -1781,10 +1802,10 @@ export function App() {
       setProfiles(previousProfiles);
       flash(`删除文件夹失败：${message}`);
     }
-  }, [flash, folders, layoutSettings.skip_delete_confirmations, profiles]);
+  }, [flash, folders, layoutSettings.skip_delete_confirmations, profiles, requestDangerConfirmation]);
 
   const deleteSessionProfile = useCallback(async (profile: SessionProfile) => {
-    if (!layoutSettings.skip_delete_confirmations && !await confirmDangerAction(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
+    if (!layoutSettings.skip_delete_confirmations && !await requestDangerConfirmation(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
       return;
     }
     const previousProfiles = profiles;
@@ -1805,7 +1826,7 @@ export function App() {
       setOpenProfileIds(previousOpenIds);
       flash(`删除服务器失败：${message}`);
     }
-  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles]);
+  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles, requestDangerConfirmation]);
 
   const copyTerminalSelection = useCallback(async () => {
     const selected = terminalRef.current?.getSelection().trim();
@@ -1892,7 +1913,7 @@ export function App() {
     }
     if (!layoutSettings.skip_delete_confirmations) {
       const action = deleteLocal ? "移除传输记录并删除本地文件" : "移除传输记录";
-      if (!await confirmDangerAction(`${action}：${remoteBasename(transfer.remote_path)}？`)) {
+      if (!await requestDangerConfirmation(`${action}：${remoteBasename(transfer.remote_path)}？`)) {
         return;
       }
     }
@@ -1923,7 +1944,7 @@ export function App() {
       return next;
     });
     flash(deleteLocal ? "已移除记录并删除本地文件" : "已移除传输记录");
-  }, [flash, layoutSettings.skip_delete_confirmations, deleteLocalFile]);
+  }, [deleteLocalFile, flash, layoutSettings.skip_delete_confirmations, requestDangerConfirmation]);
 
   const retryTransfer = useCallback(async (transfer: SftpProgress) => {
     const session = sessions.find((item) => item.id === transfer.session_id && isConnectedState(item.state));
@@ -2063,6 +2084,28 @@ export function App() {
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - 180))
     });
   }, []);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const menu = contextMenuRef.current;
+      if (!menu) {
+        return;
+      }
+      const rect = menu.getBoundingClientRect();
+      const margin = 8;
+      const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
+      const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
+      const nextX = Math.max(margin, Math.min(contextMenu.x, maxX));
+      const nextY = Math.max(margin, Math.min(contextMenu.y, maxY));
+      if (Math.abs(nextX - contextMenu.x) > 0.5 || Math.abs(nextY - contextMenu.y) > 0.5) {
+        setContextMenu((current) => current ? { ...current, x: nextX, y: nextY } : current);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [contextMenu]);
 
   const activatePreviousProfile = useCallback(() => {
     if (activeProfileIndex > 0) {
@@ -2347,11 +2390,11 @@ export function App() {
 
           <div className="sidebar-footer">
             <button className="app-settings-button primary" onClick={() => setAppSettingsOpen(true)} title="应用设置">
-              <Settings size={14} />
+              <Settings size={15} />
               <span>custom</span>
             </button>
             <button className="app-settings-button update" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
-              <Download size={12} />
+              <Download size={13} />
             </button>
           </div>
         </aside>
@@ -2455,7 +2498,7 @@ export function App() {
                 profiles={profiles}
                 onAdd={openNewProfileDialog}
                 activeProfileId={activeProfileId}
-                onSelect={(profile) => openShellProfile(profile.id)}
+                onSelect={() => undefined}
                 onConnect={(profile) => void connectSelectedProfile(profile)}
               />
             ) : (
@@ -2767,6 +2810,7 @@ export function App() {
       {contextMenu ? (
         <div className="context-menu-backdrop" onMouseDown={closeContextMenu}>
           <div
+            ref={contextMenuRef}
             className="context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onMouseDown={(event) => event.stopPropagation()}
@@ -2926,6 +2970,15 @@ export function App() {
             )}
           </div>
         </div>
+      ) : null}
+
+      {dangerConfirm ? (
+        <DangerConfirmDialog
+          title={dangerConfirm.title}
+          message={dangerConfirm.message}
+          onCancel={() => closeDangerConfirmation(false)}
+          onConfirm={() => closeDangerConfirmation(true)}
+        />
       ) : null}
 
       {notice ? <div className="toast">{notice}</div> : null}
@@ -3198,20 +3251,6 @@ async function writeClipboardText(text: string) {
     } finally {
       textarea.remove();
     }
-  }
-}
-
-async function confirmDangerAction(message: string) {
-  if (!isDesktopRuntime) {
-    return window.confirm(message);
-  }
-  try {
-    return await confirmDialog(message, {
-      title: "确认删除",
-      kind: "warning"
-    });
-  } catch {
-    return window.confirm(message);
   }
 }
 
@@ -3891,80 +3930,221 @@ function ConnectionHome({
   onSelect: (profile: SessionProfile) => void;
   onConnect: (profile: SessionProfile) => void;
 }) {
+  const HOME_ORBIT_ITEM_WIDTH = 112;
+  const homeRef = useRef<HTMLDivElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(() => Math.max(0, profiles.findIndex((profile) => profile.id === activeProfileId)));
-  const dragStateRef = useRef<{ startX: number; scrollLeft: number; dragging: boolean } | null>(null);
-  const loopPad = profiles.length > 3 ? Math.min(3, profiles.length) : 0;
+  const loopPad = profiles.length > 1 ? profiles.length : 0;
+  const loopCopyCount = loopPad ? Math.max(7, Math.ceil(12 / profiles.length) | 1) : 1;
+  const middleLoopCopy = Math.floor(loopCopyCount / 2);
+  const [highlightedOrbitIndex, setHighlightedOrbitIndex] = useState(() => middleLoopCopy * profiles.length + selectedIndex);
+  const selectedIndexRef = useRef(selectedIndex);
+  const highlightedOrbitIndexRef = useRef(highlightedOrbitIndex);
+  const dragStateRef = useRef<{ lastX: number; lastAt: number; velocity: number; dragging: boolean } | null>(null);
+  const scrollSelectionRafRef = useRef<number | null>(null);
+  const orbitMomentumRafRef = useRef<number | null>(null);
+  const orbitMomentumLastAtRef = useRef(0);
   const visibleProfiles = loopPad
-    ? [
-        ...profiles.slice(-loopPad),
-        ...profiles,
-        ...profiles.slice(0, loopPad)
-      ]
+    ? Array.from({ length: loopCopyCount }, () => profiles).flat()
     : profiles;
+
+  const normalizeScrollPosition = useCallback(() => {
+    const strip = stripRef.current;
+    if (!strip || !loopPad) {
+      return;
+    }
+    const loopWidth = profiles.length * HOME_ORBIT_ITEM_WIDTH;
+    if (loopWidth <= 0) {
+      return;
+    }
+    const loopOffset = middleLoopCopy * loopWidth;
+    if (strip.scrollLeft < loopOffset - loopWidth * 0.5) {
+      strip.scrollLeft += loopWidth;
+    } else if (strip.scrollLeft > loopOffset + loopWidth * 0.5) {
+      strip.scrollLeft -= loopWidth;
+    }
+  }, [loopPad, middleLoopCopy, profiles.length]);
+
+  const scrollProfileIntoView = useCallback((index: number, behavior: ScrollBehavior = "smooth") => {
+    const strip = stripRef.current;
+    if (!strip || profiles.length === 0) {
+      return;
+    }
+    const normalized = ((index % profiles.length) + profiles.length) % profiles.length;
+    const targetOrbitIndex = loopPad ? middleLoopCopy * profiles.length + normalized : normalized;
+    highlightedOrbitIndexRef.current = targetOrbitIndex;
+    setHighlightedOrbitIndex(targetOrbitIndex);
+    const targetLeft = targetOrbitIndex * HOME_ORBIT_ITEM_WIDTH - Math.max(0, (strip.clientWidth - HOME_ORBIT_ITEM_WIDTH) / 2);
+    strip.scrollTo({ left: Math.max(0, targetLeft), behavior });
+  }, [loopPad, middleLoopCopy, profiles.length]);
+
+  const stopOrbitMomentum = useCallback(() => {
+    if (orbitMomentumRafRef.current !== null) {
+      window.cancelAnimationFrame(orbitMomentumRafRef.current);
+      orbitMomentumRafRef.current = null;
+    }
+  }, []);
+
+  const startOrbitMomentum = useCallback((initialVelocity: number) => {
+    const strip = stripRef.current;
+    if (!strip || Math.abs(initialVelocity) < 0.04) {
+      scrollProfileIntoView(selectedIndexRef.current);
+      return;
+    }
+    stopOrbitMomentum();
+    let velocity = Math.max(-2.4, Math.min(2.4, initialVelocity));
+    orbitMomentumLastAtRef.current = performance.now();
+    const step = (now: number) => {
+      const currentStrip = stripRef.current;
+      if (!currentStrip) {
+        orbitMomentumRafRef.current = null;
+        return;
+      }
+      const dt = Math.min(34, Math.max(1, now - orbitMomentumLastAtRef.current));
+      orbitMomentumLastAtRef.current = now;
+      currentStrip.scrollLeft += velocity * dt;
+      normalizeScrollPosition();
+      velocity *= Math.pow(0.925, dt / 16);
+      if (Math.abs(velocity) < 0.035) {
+        orbitMomentumRafRef.current = null;
+        scrollProfileIntoView(selectedIndexRef.current);
+        return;
+      }
+      orbitMomentumRafRef.current = window.requestAnimationFrame(step);
+    };
+    orbitMomentumRafRef.current = window.requestAnimationFrame(step);
+  }, [normalizeScrollPosition, scrollProfileIntoView, stopOrbitMomentum]);
+
+  useEffect(() => {
+    selectedIndexRef.current = selectedIndex;
+  }, [selectedIndex]);
+
+  useEffect(() => {
+    highlightedOrbitIndexRef.current = highlightedOrbitIndex;
+  }, [highlightedOrbitIndex]);
+
+  useEffect(() => () => {
+    stopOrbitMomentum();
+  }, [stopOrbitMomentum]);
 
   useEffect(() => {
     const strip = stripRef.current;
     if (!strip || !loopPad) {
       return;
     }
-    strip.scrollLeft = loopPad * 112;
-  }, [loopPad, profiles.length]);
+    scrollProfileIntoView(selectedIndex, "auto");
+  }, [loopPad, profiles.length, scrollProfileIntoView]);
 
   useEffect(() => {
     const nextIndex = profiles.findIndex((profile) => profile.id === activeProfileId);
     if (nextIndex >= 0) {
+      selectedIndexRef.current = nextIndex;
       setSelectedIndex(nextIndex);
+      scrollProfileIntoView(nextIndex, "auto");
     }
-  }, [activeProfileId, profiles]);
+  }, [activeProfileId, profiles, scrollProfileIntoView]);
 
   const handleLoopScroll = useCallback(() => {
     const strip = stripRef.current;
-    if (!strip || !loopPad) {
+    if (!strip) {
       return;
     }
-    const itemWidth = 112;
-    const loopWidth = profiles.length * itemWidth;
-    if (strip.scrollLeft < itemWidth) {
-      strip.scrollLeft += loopWidth;
-    } else if (strip.scrollLeft > strip.scrollWidth - strip.clientWidth - itemWidth) {
-      strip.scrollLeft -= loopWidth;
+    normalizeScrollPosition();
+    if (scrollSelectionRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollSelectionRafRef.current);
     }
-  }, [loopPad, profiles.length]);
+    scrollSelectionRafRef.current = window.requestAnimationFrame(() => {
+      scrollSelectionRafRef.current = null;
+      if (profiles.length === 0) {
+        return;
+      }
+      const center = strip.scrollLeft + strip.clientWidth / 2;
+      const absoluteIndex = Math.round((center - HOME_ORBIT_ITEM_WIDTH / 2) / HOME_ORBIT_ITEM_WIDTH);
+      const normalized = ((absoluteIndex % profiles.length) + profiles.length) % profiles.length;
+      selectedIndexRef.current = normalized;
+      highlightedOrbitIndexRef.current = absoluteIndex;
+      setSelectedIndex((current) => current === normalized ? current : normalized);
+      setHighlightedOrbitIndex((current) => current === absoluteIndex ? current : absoluteIndex);
+      onSelect(profiles[normalized]);
+    });
+  }, [normalizeScrollPosition, onSelect, profiles]);
 
-  const selectProfileAt = useCallback((index: number) => {
+  const moveProfileBy = useCallback((delta: number) => {
     if (profiles.length === 0) {
       return;
     }
-    const normalized = ((index % profiles.length) + profiles.length) % profiles.length;
-    setSelectedIndex(normalized);
-    onSelect(profiles[normalized]);
-  }, [onSelect, profiles]);
+    stopOrbitMomentum();
+    const nextOrbitIndex = loopPad
+      ? highlightedOrbitIndexRef.current + delta
+      : selectedIndexRef.current + delta;
+    const nextIndex = ((nextOrbitIndex % profiles.length) + profiles.length) % profiles.length;
+    selectedIndexRef.current = nextIndex;
+    highlightedOrbitIndexRef.current = loopPad ? nextOrbitIndex : nextIndex;
+    setSelectedIndex(nextIndex);
+    setHighlightedOrbitIndex(highlightedOrbitIndexRef.current);
+    onSelect(profiles[nextIndex]);
+    const strip = stripRef.current;
+    if (strip && loopPad) {
+      strip.scrollBy({ left: delta * HOME_ORBIT_ITEM_WIDTH, behavior: "smooth" });
+      window.setTimeout(normalizeScrollPosition, 180);
+      return;
+    }
+    scrollProfileIntoView(nextIndex);
+  }, [loopPad, normalizeScrollPosition, onSelect, profiles, scrollProfileIntoView, stopOrbitMomentum]);
 
   const handleHomeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      selectProfileAt(selectedIndex - 1);
+      moveProfileBy(-1);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      selectProfileAt(selectedIndex + 1);
+      moveProfileBy(1);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const profile = profiles[selectedIndex];
+      const profile = profiles[selectedIndexRef.current];
       if (profile) {
         onConnect(profile);
       }
     }
-  }, [onConnect, profiles, selectProfileAt, selectedIndex]);
+  }, [moveProfileBy, onConnect, profiles]);
+
+  useEffect(() => {
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey
+      ) {
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveProfileBy(-1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        moveProfileBy(1);
+      }
+    };
+    window.addEventListener("keydown", handleWindowKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [moveProfileBy]);
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const strip = stripRef.current;
     if (!strip) {
       return;
     }
-    dragStateRef.current = { startX: event.clientX, scrollLeft: strip.scrollLeft, dragging: false };
+    stopOrbitMomentum();
+    homeRef.current?.focus();
+    dragStateRef.current = { lastX: event.clientX, lastAt: performance.now(), velocity: 0, dragging: false };
     strip.setPointerCapture?.(event.pointerId);
-  }, []);
+  }, [stopOrbitMomentum]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const strip = stripRef.current;
@@ -3972,19 +4152,30 @@ function ConnectionHome({
     if (!strip || !state) {
       return;
     }
-    const delta = event.clientX - state.startX;
+    const now = performance.now();
+    const dt = Math.max(1, now - state.lastAt);
+    const delta = event.clientX - state.lastX;
+    const scrollDelta = -delta;
     if (Math.abs(delta) > 3) {
       state.dragging = true;
     }
-    strip.scrollLeft = state.scrollLeft - delta;
-  }, []);
+    strip.scrollLeft += scrollDelta;
+    state.lastX = event.clientX;
+    state.lastAt = now;
+    state.velocity = scrollDelta / dt;
+    normalizeScrollPosition();
+  }, [normalizeScrollPosition]);
 
   const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     stripRef.current?.releasePointerCapture?.(event.pointerId);
+    const dragState = dragStateRef.current;
+    if (dragState?.dragging) {
+      startOrbitMomentum(dragState.velocity);
+    }
     window.setTimeout(() => {
       dragStateRef.current = null;
     }, 0);
-  }, []);
+  }, [startOrbitMomentum]);
 
   if (profiles.length === 0) {
     return (
@@ -4004,7 +4195,7 @@ function ConnectionHome({
   }
 
   return (
-    <div className="connection-home" tabIndex={0} onKeyDown={handleHomeKeyDown}>
+    <div ref={homeRef} className="connection-home" tabIndex={0} onKeyDownCapture={handleHomeKeyDown}>
       <button className="connection-home-add" title="添加服务器" onClick={onAdd}>
         <Plus size={24} />
       </button>
@@ -4014,7 +4205,10 @@ function ConnectionHome({
         aria-label="服务器快捷入口"
         onScroll={handleLoopScroll}
         onWheel={(event) => {
+          event.preventDefault();
+          stopOrbitMomentum();
           event.currentTarget.scrollLeft += event.deltaY || event.deltaX;
+          handleLoopScroll();
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -4023,9 +4217,11 @@ function ConnectionHome({
       >
         {visibleProfiles.map((profile, index) => {
           const os = inferProfileOs(profile);
-          const isSelected = profiles[selectedIndex]?.id === profile.id;
+          const isSelected = index === highlightedOrbitIndex && profiles[selectedIndex]?.id === profile.id;
           return (
-            <button
+            <div
+              role="button"
+              tabIndex={-1}
               className={`profile-orbit-item ${os.tone} ${isSelected ? "selected" : ""}`}
               key={`${profile.id}-${index}`}
               title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}\n${profile.group ?? "未分组"}`}
@@ -4034,14 +4230,18 @@ function ConnectionHome({
                   event.preventDefault();
                   return;
                 }
-                setSelectedIndex(profiles.findIndex((item) => item.id === profile.id));
+                selectedIndexRef.current = profiles.findIndex((item) => item.id === profile.id);
+                highlightedOrbitIndexRef.current = index;
+                setSelectedIndex(selectedIndexRef.current);
+                setHighlightedOrbitIndex(index);
                 onSelect(profile);
+                homeRef.current?.focus();
               }}
               onDoubleClick={() => onConnect(profile)}
             >
               <span className="profile-orbit-icon">{os.label}</span>
               <small>{profile.host}</small>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -4390,6 +4590,52 @@ function UsageBar({ value, tone }: { value: number; tone: "cpu" | "memory" | "sw
   return (
     <div className={`usage-bar ${tone}`} aria-hidden="true">
       <span style={{ width: `${clampPercent(value)}%` }} />
+    </div>
+  );
+}
+
+function DangerConfirmDialog({
+  title,
+  message,
+  onCancel,
+  onConfirm
+}: {
+  title: string;
+  message: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop danger-confirm-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section
+        className="danger-confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="danger-confirm-titlebar">
+          <div className="danger-confirm-title">
+            <span className="danger-confirm-icon">
+              <TriangleAlert size={17} />
+            </span>
+            <strong>{title}</strong>
+          </div>
+          <button className="dialog-close" onClick={onCancel} title="取消">
+            <X size={15} />
+          </button>
+        </header>
+        <div className="danger-confirm-body">
+          <p>{message}</p>
+          <small>此操作可能影响已保存的连接信息或远程文件。</small>
+        </div>
+        <footer className="danger-confirm-actions">
+          <button className="secondary-button" onClick={onCancel}>取消</button>
+          <button className="danger-confirm-button" onClick={onConfirm}>
+            <Trash2 size={14} /> 确认删除
+          </button>
+        </footer>
+      </section>
     </div>
   );
 }
