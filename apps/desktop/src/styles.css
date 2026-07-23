@@ -838,16 +838,16 @@ button {
   position: relative;
   isolation: isolate;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) 26px;
   align-items: center;
   flex: 0 0 auto;
-  gap: 7px;
+  gap: 8px;
   margin-top: auto;
-  width: 128px;
-  max-width: calc(100% - 8px);
-  min-height: 28px;
-  padding: 2px 4px 2px 8px;
-  border-radius: var(--radius-md);
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 10px 0;
+  border-top: 1px solid rgba(31, 35, 40, 0.1);
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
@@ -862,10 +862,10 @@ button {
   align-items: center;
   justify-content: center;
   min-width: 0;
-  height: 24px;
+  height: 26px;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -880,14 +880,14 @@ button {
 }
 
 .app-settings-button.update {
-  width: 24px;
+  width: 26px;
   border-radius: 999px;
   background: var(--accent);
   color: #ffffff;
 }
 
 .app-settings-button:hover {
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .app-settings-button.update:hover {
@@ -1453,7 +1453,7 @@ button {
   background: var(--terminal-bg);
 }
 
-.has-workspace-bg .terminal-stage::before,
+.has-workspace-bg .terminal-region::before,
 .has-home-bg .connection-home::before {
   position: absolute;
   inset: 0;
@@ -1466,17 +1466,21 @@ button {
   opacity: var(--joy-custom-background-opacity, 0.28);
 }
 
-.has-workspace-bg .terminal-stage,
+.has-workspace-bg .terminal-region,
 .has-home-bg .connection-home {
   isolation: isolate;
 }
 
+.has-workspace-bg .terminal-tabs,
+.has-workspace-bg .terminal-stage,
 .has-workspace-bg .joy-terminal,
 .has-home-bg .connection-home > * {
   position: relative;
   z-index: 1;
 }
 
+.has-workspace-bg .terminal-region,
+.has-workspace-bg .terminal-tabs,
 .has-workspace-bg .terminal-stage,
 .has-workspace-bg .joy-terminal,
 .has-workspace-bg .joy-terminal .xterm-viewport,
@@ -3283,6 +3287,19 @@ button {
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 24px 80px rgba(31, 35, 40, 0.22);
+}
+
+.image-crop-dialog .dialog-actions {
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.image-crop-dialog .dialog-actions button {
+  flex: 0 0 104px;
+  width: 104px;
+  height: 34px;
+  border-radius: 9px;
+  font-weight: 650;
 }
 
 .image-crop-body {
