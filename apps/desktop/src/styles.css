@@ -71,7 +71,7 @@
   --chrome-bg-x: 0px;
   --chrome-bg-y: 0px;
   --chrome-bg-width: max(100vw, 1200px);
-  --chrome-bg-height: 920px;
+  --chrome-bg-height: max(100dvh, 920px);
   --left-chrome-background:
     radial-gradient(circle at var(--sidebar-glow-x, 28%) var(--sidebar-glow-y, 20%), hsla(var(--sidebar-top-hue, 226), 80%, 86%, var(--sidebar-glow-opacity, 0.34)), transparent 39%),
     linear-gradient(
@@ -159,7 +159,7 @@ button {
   background-position: var(--chrome-bg-x) var(--chrome-bg-y);
   background-repeat: no-repeat;
   background-size: var(--chrome-bg-width) var(--chrome-bg-height);
-  background-color: hsl(var(--sidebar-top-hue, 226), 36%, 95.1%);
+  background-color: hsl(var(--sidebar-bottom-hue, 24), 70%, var(--sidebar-bottom-light, 94.2%));
   isolation: isolate;
   transition: grid-template-columns 160ms ease;
 }
@@ -467,7 +467,7 @@ button {
 
 .sidebar.session-sidebar-mode {
   grid-template-rows: auto 32px minmax(0, 1fr) var(--sidebar-footer-height);
-  gap: 8px;
+  gap: 0;
 }
 
 .sidebar.settings-sidebar-mode {
@@ -837,6 +837,7 @@ button {
 }
 
 .sidebar.session-sidebar-mode .search-box {
+  margin-top: 8px;
   margin-bottom: 0;
 }
 
@@ -853,6 +854,7 @@ button {
   min-height: 0;
   flex-direction: column;
   gap: 4px;
+  margin-top: 8px;
   margin-bottom: 0;
   overflow-x: hidden;
   overflow-y: auto;
