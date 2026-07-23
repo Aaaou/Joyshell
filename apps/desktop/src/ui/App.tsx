@@ -2179,11 +2179,14 @@ export function App() {
   const splashCenterImageSrc = layoutSettings.splash_center_image_data_url || splashCenterImage;
   const usingDefaultTerminalBackground = !layoutSettings.terminal_background_image_data_url;
   const terminalBackgroundImage = layoutSettings.terminal_background_image_data_url || defaultWorkspaceBackground;
+  const terminalBackgroundOpacity = layoutSettings.terminal_background_image_data_url
+    ? clampNumber(layoutSettings.terminal_background_opacity, 0, 100) / 100
+    : 1;
   const hasWorkspaceBackground = Boolean(terminalBackgroundImage && layoutSettings.terminal_background_apply_workspace);
   const hasHomeBackground = Boolean(terminalBackgroundImage && (layoutSettings.terminal_background_apply_home || usingDefaultTerminalBackground));
   const appCustomStyle = {
     "--joy-custom-background-image": terminalBackgroundImage ? `url("${escapeCssUrl(terminalBackgroundImage)}")` : "none",
-    "--joy-custom-background-opacity": String(clampNumber(layoutSettings.terminal_background_opacity, 0, 100) / 100)
+    "--joy-custom-background-opacity": String(terminalBackgroundOpacity)
   } as React.CSSProperties;
 
   return (
