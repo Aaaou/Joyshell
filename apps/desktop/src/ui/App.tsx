@@ -3634,8 +3634,10 @@ function moveProfileWithinCurrentGroup(
     return profiles;
   }
   const group = profile.group ?? null;
-  const sameGroup = profiles.filter((item) => (item.group ?? null) === group)
-    .sort((left, right) => (left.sort_order ?? 0) - (right.sort_order ?? 0));
+  const sameGroup = sortProfilesForSidebar(
+    profiles.filter((item) => (item.group ?? null) === group),
+    "custom"
+  );
   const index = sameGroup.findIndex((item) => item.id === profileId);
   if (index < 0) {
     return profiles;
@@ -3652,11 +3654,16 @@ function moveProfileWithinCurrentGroup(
         : Math.min(reordered.length, index + 1);
   reordered.splice(targetIndex, 0, item);
   const orderById = new Map(reordered.map((profileItem, order) => [profileItem.id, order]));
-  return normalizeProfileSortOrders(profiles.map((profileItem) => (
-    orderById.has(profileItem.id)
-      ? { ...profileItem, sort_order: orderById.get(profileItem.id) ?? profileItem.sort_order }
+  const reorderedById = new Map(reordered.map((profileItem) => [profileItem.id, profileItem]));
+  const replacementQueue = reordered.map((profileItem) => ({
+    ...profileItem,
+    sort_order: orderById.get(profileItem.id) ?? profileItem.sort_order
+  }));
+  return profiles.map((profileItem) => (
+    reorderedById.has(profileItem.id)
+      ? replacementQueue.shift() ?? profileItem
       : profileItem
-  )));
+  ));
 }
 
 function findProfileDropIndicator(clientX: number, clientY: number, draggedId: string) {

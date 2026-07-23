@@ -80,6 +80,31 @@
 }
 
 * {
+  scrollbar-color: rgba(31, 35, 40, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(31, 35, 40, 0.24);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(31, 35, 40, 0.34);
+}
+
+* {
   box-sizing: border-box;
 }
 
@@ -420,7 +445,7 @@ button {
   min-height: 0;
   flex-direction: column;
   gap: 12px;
-  padding: 8px 10px 12px;
+  padding: 8px 10px 7px;
   border-right: 0;
   background: transparent;
   pointer-events: auto;
@@ -615,8 +640,8 @@ button {
 
 .metric {
   display: grid;
-  grid-template-columns: 16px 34px minmax(0, 1fr);
-  gap: 6px;
+  grid-template-columns: 14px 26px minmax(0, 1fr);
+  gap: 4px;
   height: 22px;
   font-size: 12px;
 }
@@ -628,15 +653,40 @@ button {
 .metric strong {
   display: inline-flex;
   justify-content: flex-end;
+  justify-self: end;
   min-width: 0;
+  max-width: 100%;
   margin-left: auto;
-  overflow: visible;
+  overflow: hidden;
   font-weight: 600;
+  line-height: 1.1;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .metric .rolling-text {
   justify-content: flex-end;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
+  overflow: visible;
+}
+
+.metric .rolling-char {
+  width: 0.56em;
+}
+
+.metric .rolling-char.space {
+  width: 0.28em;
+}
+
+.metric .rolling-char.punct {
+  width: 0.24em;
+}
+
+.metric .rolling-char.latin,
+.metric .rolling-char.wide-latin {
+  width: 0.56em;
 }
 
 .metric.warning strong {
@@ -701,20 +751,20 @@ button {
 
 .sidebar-footer {
   display: grid;
-  grid-template-columns: 30px 30px;
+  grid-template-columns: 24px 24px;
   align-items: center;
   justify-content: start;
-  gap: 8px;
+  gap: 7px;
   margin-top: auto;
-  min-height: 36px;
-  padding: 4px 2px 0;
+  min-height: 20px;
+  padding: 0 2px;
 }
 
 .app-settings-button {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: var(--radius-md);
