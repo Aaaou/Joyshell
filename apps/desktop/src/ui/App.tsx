@@ -8,7 +8,7 @@ import {
   type PhysicalPosition,
   type PhysicalSize
 } from "@tauri-apps/api/window";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import splashCenterImage from "../assets/splash/center-joy-cropped.png";
@@ -1498,7 +1498,7 @@ export function App() {
       flash("请先选择远程文件或目录");
       return;
     }
-    if (!layoutSettings.skip_delete_confirmations && !window.confirm(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`)) {
+    if (!layoutSettings.skip_delete_confirmations && !await confirmDangerAction(`确认删除远程${selectedRemoteEntry.is_dir ? "目录" : "文件"}：${selectedRemoteEntry.path}`)) {
       return;
     }
     setSftpBusy(true);
@@ -1756,7 +1756,7 @@ export function App() {
 
   const deleteSessionFolder = useCallback(async (folder: SessionFolder) => {
     const affectedCount = profiles.filter((profile) => profile.group === folder.name).length;
-    const confirmed = layoutSettings.skip_delete_confirmations || window.confirm(
+    const confirmed = layoutSettings.skip_delete_confirmations || await confirmDangerAction(
       affectedCount > 0
         ? `删除文件夹“${folder.name}”？其中 ${affectedCount} 台服务器会移动到“独立服务器”，服务器不会被删除。`
         : `删除空文件夹“${folder.name}”？`
@@ -1784,7 +1784,7 @@ export function App() {
   }, [flash, folders, layoutSettings.skip_delete_confirmations, profiles]);
 
   const deleteSessionProfile = useCallback(async (profile: SessionProfile) => {
-    if (!window.confirm(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
+    if (!layoutSettings.skip_delete_confirmations && !await confirmDangerAction(`删除服务器“${profile.name}”？保存的连接信息和密码记录也会删除。`)) {
       return;
     }
     const previousProfiles = profiles;
@@ -1805,7 +1805,7 @@ export function App() {
       setOpenProfileIds(previousOpenIds);
       flash(`删除服务器失败：${message}`);
     }
-  }, [activeProfileId, flash, openProfileIds, profiles]);
+  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles]);
 
   const copyTerminalSelection = useCallback(async () => {
     const selected = terminalRef.current?.getSelection().trim();
@@ -1892,7 +1892,7 @@ export function App() {
     }
     if (!layoutSettings.skip_delete_confirmations) {
       const action = deleteLocal ? "移除传输记录并删除本地文件" : "移除传输记录";
-      if (!window.confirm(`${action}：${remoteBasename(transfer.remote_path)}？`)) {
+      if (!await confirmDangerAction(`${action}：${remoteBasename(transfer.remote_path)}？`)) {
         return;
       }
     }
@@ -2347,11 +2347,11 @@ export function App() {
 
           <div className="sidebar-footer">
             <button className="app-settings-button primary" onClick={() => setAppSettingsOpen(true)} title="应用设置">
-              <Settings size={15} />
+              <Settings size={14} />
               <span>custom</span>
             </button>
             <button className="app-settings-button update" onClick={() => flash("更新检查将在版本服务接入后启用")} title="检查更新">
-              <Download size={13} />
+              <Download size={12} />
             </button>
           </div>
         </aside>
@@ -3198,6 +3198,20 @@ async function writeClipboardText(text: string) {
     } finally {
       textarea.remove();
     }
+  }
+}
+
+async function confirmDangerAction(message: string) {
+  if (!isDesktopRuntime) {
+    return window.confirm(message);
+  }
+  try {
+    return await confirmDialog(message, {
+      title: "确认删除",
+      kind: "warning"
+    });
+  } catch {
+    return window.confirm(message);
   }
 }
 

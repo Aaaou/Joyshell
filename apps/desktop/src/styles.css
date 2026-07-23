@@ -756,18 +756,18 @@ button {
 
 .sidebar-footer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) 18px;
   align-items: center;
   flex: 0 0 auto;
-  gap: 7px;
+  gap: 4px;
   margin-top: auto;
-  width: 136px;
+  width: 104px;
   max-width: calc(100% - 8px);
-  min-height: 28px;
-  padding: 2px 4px 2px 8px;
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.34);
-  box-shadow: 0 8px 20px rgba(31, 35, 40, 0.055);
+  min-height: 22px;
+  padding: 1px 2px 1px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 5px 12px rgba(31, 35, 40, 0.04);
 }
 
 .app-settings-button {
@@ -775,7 +775,7 @@ button {
   align-items: center;
   justify-content: center;
   min-width: 0;
-  height: 24px;
+  height: 18px;
   padding: 0;
   border: 0;
   border-radius: var(--radius-md);
@@ -786,14 +786,14 @@ button {
 
 .app-settings-button.primary {
   justify-content: flex-start;
-  gap: 7px;
+  gap: 4px;
   width: 100%;
   color: var(--text);
-  font-size: 12px;
+  font-size: 10.5px;
 }
 
 .app-settings-button.update {
-  width: 24px;
+  width: 18px;
   border-radius: 999px;
   background: var(--accent);
   color: #ffffff;
