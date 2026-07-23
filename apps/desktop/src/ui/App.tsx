@@ -98,7 +98,7 @@ type SessionEventPayload =
   | { SftpProgress: SftpProgress };
 
 const isDesktopRuntime = "__TAURI_INTERNALS__" in window;
-const clientBuildLabel = "0.1.23 resize-bg-stabilized-20260723";
+const clientBuildLabel = "0.1.24 chrome-unified-20260723";
 const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
 
 function applySidebarPositionGradient(

@@ -157,6 +157,7 @@ button {
   background: var(--left-chrome-background);
   background-position: var(--chrome-bg-x) var(--chrome-bg-y);
   background-size: max(100vw, 1200px) max(100vh, 760px);
+  isolation: isolate;
   transition: grid-template-columns 160ms ease;
 }
 
@@ -423,54 +424,10 @@ button {
   -webkit-app-region: no-drag;
 }
 
-.left-chrome::before {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  content: "";
-  background: var(--left-chrome-background);
-  background-position: var(--chrome-bg-x) var(--chrome-bg-y);
-  background-size: max(100vw, 1200px) max(100vh, 760px);
-  clip-path: polygon(
-    0 0,
-    100% 0,
-    100% 38px,
-    var(--chrome-left-clip-width) 38px,
-    var(--chrome-left-clip-width) 100%,
-    0 100%
-  );
-}
-
-.app-shell.home-mode .left-chrome::before {
-  clip-path: polygon(
-    0 0,
-    var(--chrome-left-clip-width) 0,
-    var(--chrome-left-clip-width) 100%,
-    0 100%
-  );
-}
-
+.left-chrome::before,
 .left-chrome::after {
-  position: absolute;
-  top: 38px;
-  left: var(--chrome-left-clip-width);
-  z-index: 1;
-  width: 18px;
-  height: 18px;
-  pointer-events: none;
-  content: "";
-  background: var(--left-chrome-background);
-  background-position:
-    calc(var(--chrome-bg-x) - var(--left-chrome-width))
-    calc(var(--chrome-bg-y) - 38px);
-  background-size: max(100vw, 1200px) max(100vh, 760px);
-  mask-image: radial-gradient(circle at 100% 100%, transparent 0 15.5px, #000 16px);
-  -webkit-mask-image: radial-gradient(circle at 100% 100%, transparent 0 15.5px, #000 16px);
-}
-
-.app-shell.sidebar-collapsed .left-chrome::after {
-  opacity: 0;
+  display: none;
+  content: none;
 }
 
 .sidebar {
@@ -524,13 +481,8 @@ button {
 }
 
 .sidebar-session-shell::before {
-  position: absolute;
-  inset: 40px 0 var(--sidebar-footer-height) 0;
-  z-index: 0;
-  pointer-events: none;
-  content: "";
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  background: rgba(255, 255, 255, 0.08);
+  display: none;
+  content: none;
 }
 
 .sidebar-session-shell > * {
