@@ -31,6 +31,7 @@ export type LayoutSettings = {
   last_left_sidebar_open: boolean;
   last_right_sidebar_open: boolean;
   last_bottom_panel_open: boolean;
+  use_icmp_latency_probe: boolean;
 };
 
 export type SessionInfo = {

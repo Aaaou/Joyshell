@@ -571,8 +571,12 @@ button {
 .status-line,
 .host-address,
 .metric {
-  display: flex;
   align-items: center;
+}
+
+.status-line,
+.host-address {
+  display: flex;
 }
 
 .status-line,
@@ -610,6 +614,8 @@ button {
 }
 
 .metric {
+  display: grid;
+  grid-template-columns: 16px 34px minmax(0, 1fr);
   gap: 6px;
   height: 22px;
   font-size: 12px;
@@ -620,8 +626,17 @@ button {
 }
 
 .metric strong {
+  display: inline-flex;
+  justify-content: flex-end;
+  min-width: 0;
   margin-left: auto;
+  overflow: visible;
   font-weight: 600;
+}
+
+.metric .rolling-text {
+  justify-content: flex-end;
+  max-width: 100%;
 }
 
 .metric.warning strong {
@@ -630,6 +645,10 @@ button {
 
 .metric.success strong {
   color: var(--success);
+}
+
+.metric.danger strong {
+  color: var(--danger);
 }
 
 .system-details {
@@ -2121,11 +2140,11 @@ button {
 
 .transfer-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-  min-height: 48px;
-  padding: 7px 8px;
+  min-height: 72px;
+  padding: 8px 8px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -2137,7 +2156,7 @@ button {
 
 .transfer-row-main {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
   flex: 1;
 }
@@ -2155,15 +2174,17 @@ button {
 
 .transfer-telemetry {
   display: grid;
-  grid-template-columns: minmax(92px, max-content) minmax(92px, max-content);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   min-width: 0;
-  gap: 4px 8px;
+  gap: 5px 12px;
+  padding-top: 1px;
 }
 
 .transfer-metric {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, max-content);
   align-items: center;
-  gap: 5px;
+  column-gap: 7px;
   min-width: 0;
   height: 18px;
   padding: 0;
@@ -2172,6 +2193,10 @@ button {
   background: transparent;
   font-size: 11px;
   line-height: 1;
+}
+
+.transfer-metric.span {
+  grid-column: 1 / -1;
 }
 
 .transfer-metric.success {
@@ -2189,6 +2214,12 @@ button {
 .transfer-metric-label {
   flex: 0 0 auto;
   color: var(--muted);
+  text-align: left;
+}
+
+.transfer-metric .rolling-text {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .rolling-text {
@@ -2202,11 +2233,31 @@ button {
 .rolling-char {
   position: relative;
   display: inline-block;
-  width: 0.62em;
+  width: 0.68em;
   height: 1.1em;
   overflow: hidden;
   text-align: center;
   line-height: 1.1em;
+}
+
+.rolling-char.space {
+  width: 0.42em;
+}
+
+.rolling-char.punct {
+  width: 0.38em;
+}
+
+.rolling-char.latin {
+  width: 0.72em;
+}
+
+.rolling-char.wide-latin {
+  width: 0.92em;
+}
+
+.rolling-char.wide {
+  width: 1em;
 }
 
 .rolling-char.stable {
@@ -2288,6 +2339,7 @@ button {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  padding-top: 29px;
 }
 
 .transfer-row-actions button {
@@ -2344,7 +2396,7 @@ button {
   align-items: center;
   gap: 14px;
   padding-top: 52px;
-  border-right: 1px solid var(--line);
+  border-right: 0;
   color: var(--muted);
 }
 
@@ -2380,6 +2432,26 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.transfer-panel {
+  flex: 0 0 auto;
+}
+
+.assistant-research-panel {
+  margin-top: auto;
+  padding: 10px 0 0;
+  border-bottom: 0;
+  color: var(--muted-soft);
+  font-size: 12px;
+}
+
+.assistant-research-panel span {
+  display: inline-flex;
+  width: fit-content;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .assistant-list {

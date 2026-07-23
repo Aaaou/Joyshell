@@ -13,7 +13,6 @@ import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import splashCenterImage from "../assets/splash/center-joy-cropped.png";
 import {
-  Bot,
   ChevronRight,
   Circle,
   Copy,
@@ -25,7 +24,6 @@ import {
   FolderPlus,
   HardDrive,
   MemoryStick,
-  MessageSquareText,
   Minus,
   Network,
   Palette,
@@ -58,10 +56,8 @@ import {
   getLayoutSettings,
   listCommandSnippets,
   listFolders,
-  listAssistants,
   listProfiles,
-  previewToolCall,
-  recentAudit,
+  measureLatency,
   revealLocalPath,
   saveCommandSnippet,
   saveFolder,
@@ -79,9 +75,6 @@ import {
   writeTerminal
 } from "../bridge";
 import type {
-  AgentToolCallPreview,
-  AssistantDefinition,
-  AuditEntry,
   CommandSnippet,
   LayoutSettings,
   RemoteDirectoryListing,
@@ -234,9 +227,6 @@ export function App() {
   const [openProfileIds, setOpenProfileIds] = useState<string[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [assistants, setAssistants] = useState<AssistantDefinition[]>([]);
-  const [preview, setPreview] = useState<AgentToolCallPreview | null>(null);
-  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [assistantOpen, setAssistantOpen] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
@@ -247,7 +237,8 @@ export function App() {
     default_bottom_panel_open: true,
     last_left_sidebar_open: true,
     last_right_sidebar_open: true,
-    last_bottom_panel_open: true
+    last_bottom_panel_open: true,
+    use_icmp_latency_probe: false
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
@@ -270,6 +261,8 @@ export function App() {
   const [systemSnapshot, setSystemSnapshot] = useState<SystemSnapshot | null>(null);
   const [systemDerived, setSystemDerived] = useState<SystemDerivedStats>(emptySystemDerived);
   const [systemStatus, setSystemStatus] = useState("等待连接");
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [latencyStatus, setLatencyStatus] = useState("待连接");
   const [sftpListing, setSftpListing] = useState<RemoteDirectoryListing | null>(null);
   const [sftpPath, setSftpPath] = useState("/root");
   const [selectedRemotePath, setSelectedRemotePath] = useState<string | null>(null);
@@ -549,11 +542,9 @@ export function App() {
       listProfiles(),
       listFolders(),
       listCommandSnippets(),
-      getLayoutSettings(),
-      listAssistants(),
-      recentAudit()
+      getLayoutSettings()
     ]).then(
-      ([profilesResult, foldersResult, commandsResult, layoutResult, assistantsResult, auditResult]) => {
+      ([profilesResult, foldersResult, commandsResult, layoutResult]) => {
         setProfiles(profilesResult);
         setFolders(foldersResult);
         setCommandSnippets(commandsResult);
@@ -562,8 +553,6 @@ export function App() {
         setSidebarCollapsed(!effectiveLayout.leftSidebarOpen);
         setAssistantOpen(effectiveLayout.rightSidebarOpen);
         setBottomPanelOpen(effectiveLayout.bottomPanelOpen);
-        setAssistants(assistantsResult);
-        setAudit(auditResult);
         setActiveProfileId(null);
       }
     );
@@ -775,6 +764,46 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [activeSession?.id, syncTerminalTail]);
+
+  useEffect(() => {
+    if (!activeProfile?.host || !activeProfile.port) {
+      setLatencyMs(null);
+      setLatencyStatus("待连接");
+      return;
+    }
+
+    let cancelled = false;
+    const refreshLatency = async () => {
+      setLatencyStatus("测量中");
+      try {
+        const value = await measureLatency(
+          activeProfile.host,
+          activeProfile.port,
+          layoutSettings.use_icmp_latency_probe
+        );
+        if (cancelled) {
+          return;
+        }
+        setLatencyMs(value);
+        setLatencyStatus(value === null ? "timeout" : "已同步");
+      } catch {
+        if (!cancelled) {
+          setLatencyMs(null);
+          setLatencyStatus("timeout");
+        }
+      }
+    };
+
+    void refreshLatency();
+    const timer = window.setInterval(() => {
+      void refreshLatency();
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeProfile?.host, activeProfile?.port, layoutSettings.use_icmp_latency_probe]);
 
   const flash = useCallback((message: string) => {
     setNotice(message);
@@ -1187,15 +1216,6 @@ export function App() {
 
     await connectSelectedProfile(activeProfile);
   }, [activeProfile, connectSelectedProfile, flash, profiles]);
-
-  const runPreview = useCallback(async () => {
-    const result = await previewToolCall(
-      "General Assistant",
-      "terminal.run_command",
-      "df -h"
-    );
-    setPreview(result);
-  }, []);
 
   const handleInput = useCallback(
     (data: string) => {
@@ -2056,6 +2076,7 @@ export function App() {
             <Metric icon={<MemoryStick size={14} />} label="内存" value={formatMemoryMetric(systemSnapshot?.memory)} tone="warning" />
             <Metric icon={<HardDrive size={14} />} label="磁盘" value={formatRootDisk(systemSnapshot)} />
             <Metric icon={<Network size={14} />} label="网络" value={`${formatRate(systemDerived.rxRate)}/${formatRate(systemDerived.txRate)}`} tone="success" />
+            <Metric icon={<RefreshCw size={14} />} label="时延" value={formatLatency(latencyMs, latencyStatus)} tone={latencyTone(latencyMs, latencyStatus)} />
             <div className="system-details">
               <span>运行 {formatUptime(systemSnapshot?.uptime_seconds ?? 0)}</span>
               <span>负载 {formatLoad(systemSnapshot)}</span>
@@ -2593,41 +2614,9 @@ export function App() {
         >
           <PanelRight size={17} />
         </button>
-        <div className="drawer-rail">
-          <Bot size={18} />
-          <ShieldCheck size={18} />
-          <MessageSquareText size={18} />
-        </div>
+        <div className="drawer-rail" />
         <div className="drawer-content">
-          <section className="panel">
-            <div className="panel-heading">
-              <Bot size={17} />
-              <strong>AI 助手</strong>
-            </div>
-            <div className="assistant-list">
-              {assistants.map((assistant) => (
-                <div className="assistant-item" key={assistant.kind}>
-                  <div className="assistant-avatar">{assistant.display_name.slice(0, 1)}</div>
-                  <div>
-                    <span>{assistant.display_name}</span>
-                    <small>{assistant.can_spawn_children ? "main" : "limited"}</small>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <button className="secondary-button" onClick={runPreview}>
-              <ShieldCheck size={15} /> Preview command permission
-            </button>
-            {preview ? (
-              <div className={`decision ${preview.decision.behavior.toLowerCase()}`}>
-                <strong>{preview.decision.behavior}</strong>
-                <span>{preview.tool_name}</span>
-                <small>{preview.decision.reason}</small>
-              </div>
-            ) : null}
-          </section>
-
-          <section className="panel">
+          <section className="panel transfer-panel">
             <div className="panel-heading">
               <Folder size={17} />
               <strong>任务队列</strong>
@@ -2659,7 +2648,7 @@ export function App() {
                     </span>
                     <small>{statusLabel}</small>
                     <div className="transfer-telemetry">
-                      <TransferMetric tone="success" label="大小" value={telemetry.size} />
+                      <TransferMetric tone="success" label="大小" value={telemetry.size} span />
                       <TransferMetric tone="danger" label="时间" value={telemetry.time} />
                       {telemetry.rate ? <TransferMetric tone="warning" label="速度" value={telemetry.rate} /> : null}
                     </div>
@@ -2676,6 +2665,10 @@ export function App() {
                 </div>
               );
             })}
+          </section>
+
+          <section className="panel assistant-research-panel">
+            <span>in researching</span>
           </section>
         </div>
       </aside>
@@ -3112,14 +3105,16 @@ async function writeClipboardText(text: string) {
 function TransferMetric({
   tone,
   label,
-  value
+  value,
+  span
 }: {
   tone: "success" | "danger" | "warning";
   label: string;
   value: string;
+  span?: boolean;
 }) {
   return (
-    <span className={`transfer-metric ${tone}`}>
+    <span className={`transfer-metric ${tone} ${span ? "span" : ""}`}>
       <span className="transfer-metric-label">{label}</span>
       <RollingText value={value} />
     </span>
@@ -3158,11 +3153,12 @@ function RollingText({ value }: { value: string }) {
         const previousChar = previous[index] ?? " ";
         const content = char === " " ? "\u00a0" : char;
         const previousContent = previousChar === " " ? "\u00a0" : previousChar;
+        const charWidthClass = rollingCharWidthClass(char, previousChar);
         if (frame.sequence === 0 || char === previousChar) {
-          return <span className="rolling-char stable" key={`${index}-${char}`}>{content}</span>;
+          return <span className={`rolling-char stable ${charWidthClass}`} key={`${index}-${char}`}>{content}</span>;
         }
         return (
-          <span className={`rolling-char ${frame.direction}`} key={`${frame.sequence}-${index}-${char}`}>
+          <span className={`rolling-char ${frame.direction} ${charWidthClass}`} key={`${frame.sequence}-${index}-${char}`}>
             <span className="rolling-char-old">{previousContent}</span>
             <span className="rolling-char-new">{content}</span>
           </span>
@@ -3170,6 +3166,26 @@ function RollingText({ value }: { value: string }) {
       })}
     </span>
   );
+}
+
+function rollingCharWidthClass(current: string, previous: string) {
+  const char = current.trim() ? current : previous;
+  if (!char.trim()) {
+    return "space";
+  }
+  if (/[^\x00-\x7F]/.test(char)) {
+    return "wide";
+  }
+  if (/[MW@%]/.test(char)) {
+    return "wide-latin";
+  }
+  if (/[A-Z]/.test(char)) {
+    return "latin";
+  }
+  if (/[./:]/.test(char)) {
+    return "punct";
+  }
+  return "";
 }
 
 function compareRollingValue(next: string, previous: string) {
@@ -3233,6 +3249,29 @@ function formatRate(bytesPerSecond: number) {
     return "0 B/s";
   }
   return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatLatency(ms: number | null, status: string) {
+  if (ms === null) {
+    return status;
+  }
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
+  return `${Math.max(1, Math.round(ms))}ms`;
+}
+
+function latencyTone(ms: number | null, status: string): "success" | "warning" | "danger" | undefined {
+  if (ms === null) {
+    return status === "timeout" ? "danger" : undefined;
+  }
+  if (ms < 100) {
+    return "success";
+  }
+  if (ms < 500) {
+    return "warning";
+  }
+  return "danger";
 }
 
 function formatTransferDuration(seconds: number) {
@@ -3849,13 +3888,15 @@ function Metric({
   icon: React.ReactNode;
   label: string;
   value: string;
-  tone?: "warning" | "success";
+  tone?: "warning" | "success" | "danger";
 }) {
   return (
     <div className={`metric ${tone ?? ""}`}>
       {icon}
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>
+        <RollingText value={value} />
+      </strong>
     </div>
   );
 }
@@ -4285,6 +4326,20 @@ function AppSettingsDialog({
                     <small>完成后自动隐藏实时速度。</small>
                   </span>
                   <input type="checkbox" defaultChecked readOnly />
+                </label>
+              </section>
+              <section>
+                <strong>网络</strong>
+                <label className="settings-toggle-row">
+                  <span>
+                    <b>使用真实网络时延</b>
+                    <small>关闭时测 SSH 主机和端口；开启后使用 ICMP/ping 测主机回应。</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={layout.use_icmp_latency_probe}
+                    onChange={(event) => onLayoutChange({ use_icmp_latency_probe: event.target.checked })}
+                  />
                 </label>
               </section>
             </div>

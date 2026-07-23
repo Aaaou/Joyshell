@@ -37,6 +37,7 @@ pub struct LayoutSettings {
     pub last_left_sidebar_open: bool,
     pub last_right_sidebar_open: bool,
     pub last_bottom_panel_open: bool,
+    pub use_icmp_latency_probe: bool,
 }
 
 impl Default for LayoutSettings {
@@ -49,6 +50,7 @@ impl Default for LayoutSettings {
             last_left_sidebar_open: true,
             last_right_sidebar_open: true,
             last_bottom_panel_open: true,
+            use_icmp_latency_probe: false,
         }
     }
 }
@@ -459,7 +461,8 @@ impl ProfileRepository {
                                default_bottom_panel_open,
                                last_left_sidebar_open,
                                last_right_sidebar_open,
-                               last_bottom_panel_open
+                               last_bottom_panel_open,
+                               use_icmp_latency_probe
                         from layout_settings
                         where id = 'default'
                         ",
@@ -473,6 +476,7 @@ impl ProfileRepository {
                                 last_left_sidebar_open: row.get(4)?,
                                 last_right_sidebar_open: row.get(5)?,
                                 last_bottom_panel_open: row.get(6)?,
+                                use_icmp_latency_probe: row.get(7)?,
                             })
                         },
                     )
@@ -503,9 +507,10 @@ impl ProfileRepository {
                         last_left_sidebar_open,
                         last_right_sidebar_open,
                         last_bottom_panel_open,
+                        use_icmp_latency_probe,
                         updated_at
                     )
-                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
                     on conflict(id) do update set
                         restore_last_layout = excluded.restore_last_layout,
                         default_left_sidebar_open = excluded.default_left_sidebar_open,
@@ -514,6 +519,7 @@ impl ProfileRepository {
                         last_left_sidebar_open = excluded.last_left_sidebar_open,
                         last_right_sidebar_open = excluded.last_right_sidebar_open,
                         last_bottom_panel_open = excluded.last_bottom_panel_open,
+                        use_icmp_latency_probe = excluded.use_icmp_latency_probe,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -524,6 +530,7 @@ impl ProfileRepository {
                         settings.last_left_sidebar_open,
                         settings.last_right_sidebar_open,
                         settings.last_bottom_panel_open,
+                        settings.use_icmp_latency_probe,
                     ],
                 )?;
                 Ok(settings)
@@ -589,6 +596,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             last_left_sidebar_open integer not null default 1,
             last_right_sidebar_open integer not null default 1,
             last_bottom_panel_open integer not null default 1,
+            use_icmp_latency_probe integer not null default 0,
             updated_at text not null default (datetime('now'))
         );
         ",
@@ -628,6 +636,11 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         connection,
         "last_bottom_panel_open",
         "integer not null default 1",
+    )?;
+    ensure_layout_column(
+        connection,
+        "use_icmp_latency_probe",
+        "integer not null default 0",
     )?;
     ensure_table_column(
         connection,

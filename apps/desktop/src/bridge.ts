@@ -56,7 +56,8 @@ const defaultLayoutSettings: LayoutSettings = {
   default_bottom_panel_open: true,
   last_left_sidebar_open: true,
   last_right_sidebar_open: true,
-  last_bottom_panel_open: true
+  last_bottom_panel_open: true,
+  use_icmp_latency_probe: false
 };
 
 export async function listProfiles(): Promise<SessionProfile[]> {
@@ -262,6 +263,17 @@ export async function collectSystemSnapshot(sessionId: string): Promise<SystemSn
     network: [],
     filesystems: []
   };
+}
+
+export async function measureLatency(
+  host: string,
+  port: number,
+  useIcmp: boolean
+): Promise<number | null> {
+  if (canUseTauri) {
+    return invoke("measure_latency", { host, port, useIcmp });
+  }
+  return null;
 }
 
 export async function sftpListDirectory(

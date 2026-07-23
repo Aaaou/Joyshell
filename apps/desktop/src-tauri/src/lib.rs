@@ -14,9 +14,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -321,6 +323,72 @@ async fn collect_system_snapshot(
         .collect_system_snapshot(session_id)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn measure_latency(host: String, port: u16, use_icmp: bool) -> Result<Option<f64>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if use_icmp {
+            Ok(measure_icmp_latency_ms(&host).or_else(|| measure_tcp_latency_ms(&host, port)))
+        } else {
+            Ok(measure_tcp_latency_ms(&host, port))
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn measure_tcp_latency_ms(host: &str, port: u16) -> Option<f64> {
+    let address = (host, port).to_socket_addrs().ok()?.next()?;
+    let started = Instant::now();
+    TcpStream::connect_timeout(&address, Duration::from_millis(1500)).ok()?;
+    Some(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn measure_icmp_latency_ms(host: &str) -> Option<f64> {
+    let started = Instant::now();
+    let output = if cfg!(target_os = "windows") {
+        Command::new("ping")
+            .args(["-n", "1", "-w", "1500", host])
+            .output()
+            .ok()?
+    } else if cfg!(target_os = "macos") {
+        Command::new("ping")
+            .args(["-c", "1", "-W", "1500", host])
+            .output()
+            .ok()?
+    } else {
+        Command::new("ping")
+            .args(["-c", "1", "-W", "2", host])
+            .output()
+            .ok()?
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_ping_latency_ms(&text).or_else(|| Some(started.elapsed().as_secs_f64() * 1000.0))
+}
+
+fn parse_ping_latency_ms(output: &str) -> Option<f64> {
+    for marker in ["time=", "time<", "时间=", "时间<", "時間=", "時間<"] {
+        if let Some(index) = output.find(marker) {
+            let rest = &output[index + marker.len()..];
+            let number = rest
+                .chars()
+                .skip_while(|char| char.is_whitespace())
+                .take_while(|char| char.is_ascii_digit() || *char == '.')
+                .collect::<String>();
+            if let Ok(value) = number.parse::<f64>() {
+                return Some(value.max(0.1));
+            }
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -637,6 +705,7 @@ pub fn run() {
             session_diagnostics,
             terminal_output_tail,
             collect_system_snapshot,
+            measure_latency,
             sftp_list_directory,
             sftp_create_dir,
             sftp_delete_path,
