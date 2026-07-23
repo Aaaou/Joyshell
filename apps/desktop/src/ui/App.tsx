@@ -166,6 +166,9 @@ const emptySystemDerived: SystemDerivedStats = {
 
 const READY_TERMINAL_OUTPUT = "Joyshell is ready. Add an SSH connection, then click Connect.\r\n";
 const TERMINAL_CACHE_LIMIT = 2 * 1024 * 1024;
+const INTERACTIVE_LATENCY_IDLE_MS = 2500;
+const TERMINAL_OUTPUT_BUSY_MS = 1200;
+const INTERACTIVE_LATENCY_MAX_MS = 5000;
 const PROFILE_DRAG_TYPE = "application/x-joyshell-profile-id";
 const TAB_DRAG_TYPE = "application/x-joyshell-tab-profile-id";
 const dragDebugEnabled = !isDesktopRuntime && window.location.search.includes("dragTest=1");
@@ -296,6 +299,9 @@ export function App() {
   const dragIndicatorRef = useRef<DragIndicator | null>(null);
   const suppressNextClickRef = useRef(false);
   const profilesRef = useRef<SessionProfile[]>([]);
+  const lastTerminalInputAtRef = useRef<Record<string, number>>({});
+  const lastTerminalOutputAtRef = useRef<Record<string, number>>({});
+  const pendingInteractiveLatencyRef = useRef<Record<string, number>>({});
 
   const replaceTerminalOutput = useCallback((data: string, profileId?: string | null) => {
     const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
@@ -310,6 +316,17 @@ export function App() {
 
   const appendTerminalOutput = useCallback((data: string, profileId?: string | null) => {
     const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
+    const now = Date.now();
+    lastTerminalOutputAtRef.current[cacheKey] = now;
+    const pendingStartedAt = pendingInteractiveLatencyRef.current[cacheKey];
+    if (pendingStartedAt && data) {
+      const elapsed = now - pendingStartedAt;
+      if (elapsed > 0 && elapsed <= INTERACTIVE_LATENCY_MAX_MS) {
+        setLatencyMs(elapsed);
+        setLatencyStatus("交互");
+      }
+      delete pendingInteractiveLatencyRef.current[cacheKey];
+    }
     const next = trimTerminalCache((terminalCacheRef.current[cacheKey] ?? "") + data);
     terminalCacheRef.current[cacheKey] = next;
     if (cacheKey === (activeProfileIdRef.current ?? "empty")) {
@@ -776,12 +793,21 @@ export function App() {
 
     let cancelled = false;
     const refreshLatency = async () => {
+      const sessionId = activeSession?.id;
+      if (sessionId && shouldSkipActiveLatencyProbe(sessionId, Date.now(), {
+        lastInputAt: lastTerminalInputAtRef.current,
+        lastOutputAt: lastTerminalOutputAtRef.current,
+        pendingInputAt: pendingInteractiveLatencyRef.current
+      })) {
+        return;
+      }
+
       setLatencyStatus("测量中");
       try {
         let value: number | null;
-        if (activeSession?.id) {
+        if (sessionId) {
           try {
-            value = await measureSessionLatency(activeSession.id);
+            value = await measureSessionLatency(sessionId);
           } catch {
             value = await measureLatency(
               target.host,
@@ -1246,7 +1272,11 @@ export function App() {
       if (!targetSessionId) {
         return;
       }
+      const startedAt = Date.now();
+      lastTerminalInputAtRef.current[targetSessionId] = startedAt;
+      pendingInteractiveLatencyRef.current[targetSessionId] = startedAt;
       void writeTerminal(targetSessionId, data).catch((error) => {
+        delete pendingInteractiveLatencyRef.current[targetSessionId];
         const message = error instanceof Error ? error.message : String(error);
         terminalRef.current?.write(`\r\n[local input failed] ${message}\r\n`);
         void sessionDiagnostics(targetSessionId).then((diagnostics) => {
@@ -3486,6 +3516,32 @@ function resolveLatencyTarget(profile: SessionProfile | undefined) {
   const host = profile.latency_probe_host?.trim() || profile.host;
   const port = profile.latency_probe_port || profile.port;
   return { host, port };
+}
+
+function shouldSkipActiveLatencyProbe(
+  sessionId: string,
+  now: number,
+  refs: {
+    lastInputAt: Record<string, number>;
+    lastOutputAt: Record<string, number>;
+    pendingInputAt: Record<string, number>;
+  }
+) {
+  const pendingAt = refs.pendingInputAt[sessionId];
+  if (pendingAt) {
+    if (now - pendingAt <= INTERACTIVE_LATENCY_MAX_MS) {
+      return true;
+    }
+    delete refs.pendingInputAt[sessionId];
+  }
+
+  const lastInputAt = refs.lastInputAt[sessionId] ?? 0;
+  if (now - lastInputAt < INTERACTIVE_LATENCY_IDLE_MS) {
+    return true;
+  }
+
+  const lastOutputAt = refs.lastOutputAt[sessionId] ?? 0;
+  return now - lastOutputAt < TERMINAL_OUTPUT_BUSY_MS;
 }
 
 function createUniqueBlankProfile(profiles: SessionProfile[], group: string | null = null): SessionProfile {
