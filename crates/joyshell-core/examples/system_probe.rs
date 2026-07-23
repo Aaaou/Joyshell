@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
         port,
         latency_probe_host: None,
         latency_probe_port: None,
+        use_terminal_latency_probe: false,
         username,
         auth_method: AuthMethod::Password {
             secret_ref: "env://JOYSHELL_SSH_PASSWORD".to_string(),

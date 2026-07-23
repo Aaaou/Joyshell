@@ -125,10 +125,10 @@ impl ProfileRepository {
                 connection.execute(
                     "
                     insert into session_profiles (
-                        id, name, group_name, host, port, latency_probe_host, latency_probe_port, username, auth_method_json,
+                        id, name, group_name, host, port, latency_probe_host, latency_probe_port, use_terminal_latency_probe, username, auth_method_json,
                         host_key_policy, tags_json, favorite, sort_order, jump_host_id, updated_at
                     )
-                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
+                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))
                     on conflict(id) do update set
                         name = excluded.name,
                         group_name = excluded.group_name,
@@ -136,6 +136,7 @@ impl ProfileRepository {
                         port = excluded.port,
                         latency_probe_host = excluded.latency_probe_host,
                         latency_probe_port = excluded.latency_probe_port,
+                        use_terminal_latency_probe = excluded.use_terminal_latency_probe,
                         username = excluded.username,
                         auth_method_json = excluded.auth_method_json,
                         host_key_policy = excluded.host_key_policy,
@@ -153,6 +154,7 @@ impl ProfileRepository {
                         profile.port,
                         profile.latency_probe_host,
                         profile.latency_probe_port,
+                        profile.use_terminal_latency_probe,
                         profile.username,
                         serde_json::to_string(&profile.auth_method).map_err(json_to_sql_error)?,
                         serde_json::to_string(&profile.host_key_policy)
@@ -177,7 +179,7 @@ impl ProfileRepository {
                     "
                     select id, name, group_name, host, port, username, auth_method_json,
                            host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                           latency_probe_host, latency_probe_port
+                           latency_probe_host, latency_probe_port, use_terminal_latency_probe
                     from session_profiles
                     order by favorite desc, coalesce(group_name, ''), sort_order asc, name asc
                     ",
@@ -202,7 +204,7 @@ impl ProfileRepository {
                         "
                         select id, name, group_name, host, port, username, auth_method_json,
                                host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                               latency_probe_host, latency_probe_port
+                               latency_probe_host, latency_probe_port, use_terminal_latency_probe
                         from session_profiles
                         where id = ?1
                         ",
@@ -564,6 +566,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             port integer not null,
             latency_probe_host text null,
             latency_probe_port integer null,
+            use_terminal_latency_probe integer not null default 0,
             username text not null,
             auth_method_json text not null,
             host_key_policy text not null,
@@ -668,6 +671,12 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "latency_probe_port",
         "integer null",
     )?;
+    ensure_table_column(
+        connection,
+        "session_profiles",
+        "use_terminal_latency_probe",
+        "integer not null default 0",
+    )?;
 
     Ok(())
 }
@@ -687,6 +696,7 @@ fn read_profile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionProfile>
         port: row.get::<_, u16>(4)?,
         latency_probe_host: row.get(12)?,
         latency_probe_port: row.get(13)?,
+        use_terminal_latency_probe: row.get(14)?,
         username: row.get(5)?,
         auth_method: serde_json::from_str::<AuthMethod>(&auth_method_json)
             .map_err(json_from_sql_error)?,

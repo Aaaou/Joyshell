@@ -62,6 +62,8 @@ pub struct SessionProfile {
     pub port: u16,
     pub latency_probe_host: Option<String>,
     pub latency_probe_port: Option<u16>,
+    #[serde(default)]
+    pub use_terminal_latency_probe: bool,
     pub username: String,
     pub auth_method: AuthMethod,
     pub host_key_policy: HostKeyPolicy,

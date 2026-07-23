@@ -6,6 +6,7 @@ export type SessionProfile = {
   port: number;
   latency_probe_host?: string | null;
   latency_probe_port?: number | null;
+  use_terminal_latency_probe?: boolean;
   username: string;
   tags: string[];
   favorite: boolean;

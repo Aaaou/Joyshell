@@ -58,7 +58,6 @@ import {
   listFolders,
   listProfiles,
   measureLatency,
-  measureSessionLatency,
   revealLocalPath,
   saveCommandSnippet,
   saveFolder,
@@ -169,6 +168,7 @@ const TERMINAL_CACHE_LIMIT = 2 * 1024 * 1024;
 const INTERACTIVE_LATENCY_IDLE_MS = 2500;
 const TERMINAL_OUTPUT_BUSY_MS = 1200;
 const INTERACTIVE_LATENCY_MAX_MS = 5000;
+const INTERACTIVE_LATENCY_SAMPLE_LIMIT = 6;
 const PROFILE_DRAG_TYPE = "application/x-joyshell-profile-id";
 const TAB_DRAG_TYPE = "application/x-joyshell-tab-profile-id";
 const dragDebugEnabled = !isDesktopRuntime && window.location.search.includes("dragTest=1");
@@ -302,6 +302,7 @@ export function App() {
   const lastTerminalInputAtRef = useRef<Record<string, number>>({});
   const lastTerminalOutputAtRef = useRef<Record<string, number>>({});
   const pendingInteractiveLatencyRef = useRef<Record<string, number>>({});
+  const interactiveLatencySamplesRef = useRef<Record<string, number[]>>({});
 
   const replaceTerminalOutput = useCallback((data: string, profileId?: string | null) => {
     const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
@@ -319,11 +320,12 @@ export function App() {
     const now = Date.now();
     lastTerminalOutputAtRef.current[cacheKey] = now;
     const pendingStartedAt = pendingInteractiveLatencyRef.current[cacheKey];
-    if (pendingStartedAt && data) {
+    const latencyProfile = profilesRef.current.find((profile) => profile.id === cacheKey);
+    if (latencyProfile?.use_terminal_latency_probe && pendingStartedAt && data) {
       const elapsed = now - pendingStartedAt;
       if (elapsed > 0 && elapsed <= INTERACTIVE_LATENCY_MAX_MS) {
-        setLatencyMs(elapsed);
-        setLatencyStatus("交互");
+        setLatencyMs(recordInteractiveLatencySample(cacheKey, elapsed, interactiveLatencySamplesRef.current));
+        setLatencyStatus("交互平均");
       }
       delete pendingInteractiveLatencyRef.current[cacheKey];
     }
@@ -794,34 +796,29 @@ export function App() {
     let cancelled = false;
     const refreshLatency = async () => {
       const sessionId = activeSession?.id;
-      if (sessionId && shouldSkipActiveLatencyProbe(sessionId, Date.now(), {
-        lastInputAt: lastTerminalInputAtRef.current,
-        lastOutputAt: lastTerminalOutputAtRef.current,
-        pendingInputAt: pendingInteractiveLatencyRef.current
-      })) {
+      if (sessionId && activeProfile?.use_terminal_latency_probe) {
+        if (shouldSkipActiveLatencyProbe(sessionId, Date.now(), {
+          lastInputAt: lastTerminalInputAtRef.current,
+          lastOutputAt: lastTerminalOutputAtRef.current,
+          pendingInputAt: pendingInteractiveLatencyRef.current
+        })) {
+          return;
+        }
+        if (interactiveLatencySamplesRef.current[sessionId]?.length) {
+          return;
+        }
+        setLatencyMs(null);
+        setLatencyStatus("等待交互");
         return;
       }
 
       setLatencyStatus("测量中");
       try {
-        let value: number | null;
-        if (sessionId) {
-          try {
-            value = await measureSessionLatency(sessionId);
-          } catch {
-            value = await measureLatency(
-              target.host,
-              target.port,
-              layoutSettings.use_icmp_latency_probe
-            );
-          }
-        } else {
-          value = await measureLatency(
-            target.host,
-            target.port,
-            layoutSettings.use_icmp_latency_probe
-          );
-        }
+        const value = await measureLatency(
+          target.host,
+          target.port,
+          layoutSettings.use_icmp_latency_probe
+        );
         if (cancelled) {
           return;
         }
@@ -849,6 +846,7 @@ export function App() {
     activeProfile?.port,
     activeProfile?.latency_probe_host,
     activeProfile?.latency_probe_port,
+    activeProfile?.use_terminal_latency_probe,
     activeSession?.id,
     layoutSettings.use_icmp_latency_probe
   ]);
@@ -3502,6 +3500,7 @@ function createBlankProfile(name = "新建服务器", group: string | null = nul
     port: 22,
     latency_probe_host: null,
     latency_probe_port: null,
+    use_terminal_latency_probe: false,
     username: "",
     tags: [],
     favorite: false,
@@ -3542,6 +3541,17 @@ function shouldSkipActiveLatencyProbe(
 
   const lastOutputAt = refs.lastOutputAt[sessionId] ?? 0;
   return now - lastOutputAt < TERMINAL_OUTPUT_BUSY_MS;
+}
+
+function recordInteractiveLatencySample(
+  sessionId: string,
+  value: number,
+  samplesBySession: Record<string, number[]>
+) {
+  const samples = [...(samplesBySession[sessionId] ?? []), value]
+    .slice(-INTERACTIVE_LATENCY_SAMPLE_LIMIT);
+  samplesBySession[sessionId] = samples;
+  return samples.reduce((sum, sample) => sum + sample, 0) / samples.length;
 }
 
 function createUniqueBlankProfile(profiles: SessionProfile[], group: string | null = null): SessionProfile {
@@ -4534,7 +4544,7 @@ function SshSettingsDialog({
   const [tagsText, setTagsText] = useState(profile.tags.join(", "));
   const [error, setError] = useState<string | null>(null);
 
-  const update = (key: keyof SessionProfile, value: string | number | null) => {
+  const update = (key: keyof SessionProfile, value: string | number | boolean | null) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
@@ -4660,6 +4670,14 @@ function SshSettingsDialog({
                 />
               </label>
               <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.use_terminal_latency_probe)}
+                  onChange={(event) => update("use_terminal_latency_probe", event.target.checked)}
+                />
+                <span>使用终端交互平均时延</span>
+              </label>
+              <label className="check-row">
                 <input type="checkbox" disabled />
                 <span>跳板机 / 代理链预留</span>
               </label>
@@ -4698,6 +4716,7 @@ function SshSettingsDialog({
                 host: draft.host.trim(),
                 latency_probe_host: draft.latency_probe_host?.trim() || null,
                 latency_probe_port: draft.latency_probe_port || null,
+                use_terminal_latency_probe: Boolean(draft.use_terminal_latency_probe),
                 username: draft.username.trim(),
                 group: draft.group?.trim() || null,
                 tags: tagsText
