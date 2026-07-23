@@ -344,6 +344,18 @@ async fn measure_latency(host: String, port: u16, use_icmp: bool) -> Result<Opti
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn measure_session_latency(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+) -> Result<Option<f64>, String> {
+    state
+        .sessions
+        .measure_terminal_latency(session_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn measure_tcp_latency_ms(host: &str, port: u16) -> Option<f64> {
     let address = (host, port).to_socket_addrs().ok()?.next()?;
     let started = Instant::now();
@@ -711,6 +723,7 @@ pub fn run() {
             terminal_output_tail,
             collect_system_snapshot,
             measure_latency,
+            measure_session_latency,
             sftp_list_directory,
             sftp_create_dir,
             sftp_delete_path,

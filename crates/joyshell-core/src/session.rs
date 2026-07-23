@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::{
@@ -249,6 +249,7 @@ struct SshRuntime {
 
 enum SshControl {
     Terminal(Vec<u8>),
+    MeasureLatency(oneshot::Sender<Result<Option<f64>, String>>),
 }
 
 enum SideTransferError {
@@ -466,6 +467,40 @@ impl SessionManager {
         Err(SessionError::ConnectionFailed(
             "terminal channel is not available".to_string(),
         ))
+    }
+
+    pub async fn measure_terminal_latency(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<f64>, SessionError> {
+        let receiver = {
+            let mut sessions = self.sessions.write();
+            let runtime = sessions
+                .get_mut(&session_id)
+                .ok_or(SessionError::NotFound(session_id))?;
+            runtime.info.last_seen_at = Utc::now();
+            if runtime.info.state != ConnectionState::Connected {
+                return Err(SessionError::NotConnected(session_id));
+            }
+            let ssh = runtime.ssh.as_mut().ok_or_else(|| {
+                SessionError::ConnectionFailed("terminal channel is not available".to_string())
+            })?;
+            let (sender, receiver) = oneshot::channel();
+            ssh.control
+                .send(SshControl::MeasureLatency(sender))
+                .map_err(|_| {
+                    SessionError::ConnectionFailed("terminal channel is closed".to_string())
+                })?;
+            receiver
+        };
+
+        match tokio::time::timeout(Duration::from_millis(1500), receiver).await {
+            Ok(Ok(result)) => result.map_err(SessionError::ConnectionFailed),
+            Ok(Err(_)) => Err(SessionError::ConnectionFailed(
+                "terminal latency probe was cancelled".to_string(),
+            )),
+            Err(_) => Ok(None),
+        }
     }
 
     pub async fn collect_system_snapshot(
@@ -854,6 +889,11 @@ fn run_ssh_session_loop(
                 Ok(SshControl::Terminal(data)) => {
                     pending_write.extend_from_slice(&data);
                 }
+                Ok(SshControl::MeasureLatency(response)) => {
+                    let result =
+                        measure_channel_roundtrip_ms(&session, &mut channel, &mut socket_waiter);
+                    let _ = response.send(result);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -985,6 +1025,28 @@ fn drain_channel_output(
     }
 
     true
+}
+
+fn measure_channel_roundtrip_ms(
+    session: &ssh2::Session,
+    channel: &mut ssh2::Channel,
+    socket_waiter: &mut SocketWaiter,
+) -> Result<Option<f64>, String> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(1500);
+
+    loop {
+        match channel.request_pty_size(120, 32, None, None) {
+            Ok(()) => return Ok(Some(started.elapsed().as_secs_f64() * 1000.0)),
+            Err(error) if is_transient_ssh2_error(&error) => {
+                if started.elapsed() >= timeout {
+                    return Ok(None);
+                }
+                socket_waiter.wait(session, Duration::from_millis(20));
+            }
+            Err(error) => return Err(format!("terminal latency probe failed: {error}")),
+        }
+    }
 }
 
 fn collect_system_snapshot_from_ssh(
@@ -2339,6 +2401,20 @@ fn is_transient_ssh_io_error(error: &std::io::Error) -> bool {
         || message.contains("transport read")
         || message.contains("transport write")
         || message.contains("draining incoming flow")
+}
+
+fn is_transient_ssh2_error(error: &ssh2::Error) -> bool {
+    if matches!(
+        error.code(),
+        ssh2::ErrorCode::Session(-37) | ssh2::ErrorCode::Session(-9)
+    ) {
+        return true;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("would block")
+        || message.contains("operation would block")
+        || message.contains("timed out")
+        || message.contains("timeout")
 }
 
 #[cfg(test)]

@@ -280,6 +280,13 @@ export async function measureLatency(
   return null;
 }
 
+export async function measureSessionLatency(sessionId: string): Promise<number | null> {
+  if (canUseTauri) {
+    return invoke("measure_session_latency", { sessionId });
+  }
+  return null;
+}
+
 export async function sftpListDirectory(
   sessionId: string,
   path: string

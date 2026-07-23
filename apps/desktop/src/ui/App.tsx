@@ -58,6 +58,7 @@ import {
   listFolders,
   listProfiles,
   measureLatency,
+  measureSessionLatency,
   revealLocalPath,
   saveCommandSnippet,
   saveFolder,
@@ -777,11 +778,24 @@ export function App() {
     const refreshLatency = async () => {
       setLatencyStatus("测量中");
       try {
-        const value = await measureLatency(
-          target.host,
-          target.port,
-          layoutSettings.use_icmp_latency_probe
-        );
+        let value: number | null;
+        if (activeSession?.id) {
+          try {
+            value = await measureSessionLatency(activeSession.id);
+          } catch {
+            value = await measureLatency(
+              target.host,
+              target.port,
+              layoutSettings.use_icmp_latency_probe
+            );
+          }
+        } else {
+          value = await measureLatency(
+            target.host,
+            target.port,
+            layoutSettings.use_icmp_latency_probe
+          );
+        }
         if (cancelled) {
           return;
         }
@@ -809,6 +823,7 @@ export function App() {
     activeProfile?.port,
     activeProfile?.latency_probe_host,
     activeProfile?.latency_probe_port,
+    activeSession?.id,
     layoutSettings.use_icmp_latency_probe
   ]);
 
@@ -3919,9 +3934,7 @@ function Metric({
     <div className={`metric ${tone ?? ""}`}>
       {icon}
       <span>{label}</span>
-      <strong>
-        <RollingText value={value} />
-      </strong>
+      <strong>{value}</strong>
     </div>
   );
 }
