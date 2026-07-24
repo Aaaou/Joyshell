@@ -1,6 +1,6 @@
 {
   "name": "@joyshell/desktop",
-  "version": "0.1.33",
+  "version": "0.1.41",
   "private": true,
   "type": "module",
   "scripts": {

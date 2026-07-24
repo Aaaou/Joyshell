@@ -82,6 +82,7 @@ import {
 } from "../bridge";
 import type {
   CommandSnippet,
+  ChromeGradientPreset,
   LayoutSettings,
   RemoteDirectoryListing,
   RemoteFileEntry,
@@ -98,52 +99,153 @@ type SessionEventPayload =
   | { SftpProgress: SftpProgress };
 
 const isDesktopRuntime = "__TAURI_INTERNALS__" in window;
-const clientBuildLabel = "0.1.33 rollback-to-0.1.30-20260723";
+const clientBuildLabel = "0.1.41 screen-gradient-fixed-20260724";
 const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
+
+type ChromeGradientPresetDefinition = {
+  id: ChromeGradientPreset;
+  name: string;
+  description: string;
+  stops: [string, string, string];
+  glow: string;
+  hues: [number, number, number];
+};
+
+function hexToRgb(hex: string) {
+  const normalized = hex.replace("#", "");
+  const value = normalized.length === 3
+    ? normalized.split("").map((part) => part + part).join("")
+    : normalized;
+  const parsed = Number.parseInt(value, 16);
+  return {
+    r: (parsed >> 16) & 0xff,
+    g: (parsed >> 8) & 0xff,
+    b: parsed & 0xff
+  };
+}
+
+function rgbToHex(r: number, g: number, b: number) {
+  return `#${[r, g, b].map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function mixHexColors(source: string, target: string, amount: number) {
+  const from = hexToRgb(source);
+  const to = hexToRgb(target);
+  const mix = clamp01(amount);
+  return rgbToHex(
+    from.r + (to.r - from.r) * mix,
+    from.g + (to.g - from.g) * mix,
+    from.b + (to.b - from.b) * mix
+  );
+}
+
+const CHROME_GRADIENT_PRESETS: ChromeGradientPresetDefinition[] = [
+  {
+    id: "codex_cyan",
+    name: "Codex Soft",
+    description: "参考 Codex 的浅粉紫柔和渐变。",
+    stops: ["#E4EEF8", "#F0E7F5", "#FBE3E9"],
+    glow: "rgba(238, 188, 202, 0.52)",
+    hues: [210, 324, 356]
+  },
+  {
+    id: "cool_blues",
+    name: "Cool Blues",
+    description: "更稳的浅蓝过渡。",
+    stops: ["#E3FAFF", "#CFEFFF", "#B9D8FF"],
+    glow: "rgba(125, 208, 244, 0.18)",
+    hues: [185, 198, 214]
+  },
+  {
+    id: "green_beach",
+    name: "Green Beach",
+    description: "青绿到海蓝，偏清爽。",
+    stops: ["#E7FFF8", "#D0F8ED", "#BEEBE6"],
+    glow: "rgba(131, 228, 212, 0.18)",
+    hues: [162, 174, 188]
+  },
+  {
+    id: "slight_ocean_view",
+    name: "Slight Ocean View",
+    description: "蓝紫更柔和一点。",
+    stops: ["#F1F4FF", "#DDE5FF", "#C7D3FF"],
+    glow: "rgba(185, 195, 255, 0.16)",
+    hues: [224, 238, 252]
+  },
+  {
+    id: "perfect_blue",
+    name: "Perfect Blue",
+    description: "偏深蓝，适合低亮度。",
+    stops: ["#ECF3FF", "#D4E2FF", "#B7CAFF"],
+    glow: "rgba(166, 191, 255, 0.16)",
+    hues: [212, 224, 238]
+  }
+];
+
+function resolveChromeGradientPreset(presetId: string | null | undefined) {
+  return CHROME_GRADIENT_PRESETS.find((preset) => preset.id === presetId) ?? CHROME_GRADIENT_PRESETS[0];
+}
 
 function applySidebarPositionGradient(
   position: { x: number; y: number },
   monitor: Monitor | null,
-  windowSize?: { width: number; height: number } | null
+  windowSize?: { width: number; height: number } | null,
+  presetId?: ChromeGradientPreset | null
 ) {
+  const preset = resolveChromeGradientPreset(presetId);
   const monitorX = monitor?.position.x ?? 0;
   const monitorY = monitor?.position.y ?? 0;
   const monitorWidth = Math.max(monitor?.size.width ?? 1920, 1);
   const monitorHeight = Math.max(monitor?.size.height ?? 1080, 1);
-  const centerX = position.x + (windowSize?.width ?? monitorWidth * 0.34) / 2;
-  const centerY = position.y + (windowSize?.height ?? monitorHeight * 0.55) / 2;
+  const windowWidth = Math.max(windowSize?.width ?? monitorWidth * 0.34, 1);
+  const windowHeight = Math.max(windowSize?.height ?? monitorHeight * 0.55, 1);
+  const centerX = position.x + windowWidth / 2;
+  const centerY = position.y + windowHeight / 2;
   const xRatio = clamp01((centerX - monitorX) / monitorWidth);
   const yRatio = clamp01((centerY - monitorY) / monitorHeight);
-  const topHue = 206 + xRatio * 36 + yRatio * 24;
-  const midHue = 318 + xRatio * 28 + yRatio * 34;
-  const bottomHue = 10 + yRatio * 58 + xRatio * 18;
-  const glowX = 16 + xRatio * 66;
-  const glowY = 10 + yRatio * 58;
-  const topLight = 96.6 - yRatio * 4.4 + xRatio * 0.8;
-  const midLight = 95.4 - yRatio * 1.6;
-  const bottomLight = 92.8 + yRatio * 3.0 - xRatio * 0.8;
-  const glowOpacity = 0.3 + xRatio * 0.12 + (1 - yRatio) * 0.08;
-  const bgX = -Math.round(xRatio * 180);
-  const bgY = -Math.round(yRatio * 120);
+  const [baseTopHue, baseMidHue, baseBottomHue] = preset.hues;
+  const topHue = baseTopHue + xRatio * 8 + yRatio * 6;
+  const midHue = baseMidHue + xRatio * 8 + yRatio * 6;
+  const bottomHue = baseBottomHue + xRatio * 5 + yRatio * 4;
+  const glowX = 10 + xRatio * 42;
+  const glowY = 78 + yRatio * 16;
+  const topBlend = 0.02 + (1 - yRatio) * 0.02;
+  const midBlend = 0.03 + (1 - yRatio) * 0.02;
+  const bottomBlend = 0.015 + xRatio * 0.015;
+  const topLight = `${(94.8 - yRatio * 0.35 - xRatio * 0.15).toFixed(1)}%`;
+  const midLight = `${(95.2 - yRatio * 0.35 - xRatio * 0.10).toFixed(1)}%`;
+  const bottomLight = `${(96.2 - yRatio * 0.25 + xRatio * 0.08).toFixed(1)}%`;
+  const glowOpacity = 0.30 + xRatio * 0.06 + yRatio * 0.08;
+  const canvasWidth = Math.max(monitorWidth, windowWidth, 1);
+  const canvasHeight = Math.max(monitorHeight, windowHeight, 1);
+  const bgX = Math.round(monitorX - position.x);
+  const bgY = Math.round(monitorY - position.y);
 
   document.documentElement.style.setProperty("--sidebar-top-hue", topHue.toFixed(1));
   document.documentElement.style.setProperty("--sidebar-mid-hue", midHue.toFixed(1));
   document.documentElement.style.setProperty("--sidebar-bottom-hue", bottomHue.toFixed(1));
+  document.documentElement.style.setProperty("--sidebar-top-light", topLight);
+  document.documentElement.style.setProperty("--sidebar-mid-light", midLight);
+  document.documentElement.style.setProperty("--sidebar-bottom-light", bottomLight);
   document.documentElement.style.setProperty("--sidebar-glow-x", `${glowX.toFixed(1)}%`);
   document.documentElement.style.setProperty("--sidebar-glow-y", `${glowY.toFixed(1)}%`);
-  document.documentElement.style.setProperty("--sidebar-top-light", `${topLight.toFixed(1)}%`);
-  document.documentElement.style.setProperty("--sidebar-mid-light", `${midLight.toFixed(1)}%`);
-  document.documentElement.style.setProperty("--sidebar-bottom-light", `${bottomLight.toFixed(1)}%`);
-  document.documentElement.style.setProperty("--sidebar-glow-opacity", glowOpacity.toFixed(3));
+  document.documentElement.style.setProperty("--sidebar-glow-opacity", glowOpacity.toFixed(2));
+  document.documentElement.style.setProperty("--chrome-gradient-stop-1", mixHexColors(preset.stops[0], "#ffffff", topBlend));
+  document.documentElement.style.setProperty("--chrome-gradient-stop-2", mixHexColors(preset.stops[1], "#ffffff", midBlend));
+  document.documentElement.style.setProperty("--chrome-gradient-stop-3", mixHexColors(preset.stops[2], "#ffffff", bottomBlend));
+  document.documentElement.style.setProperty("--chrome-gradient-glow", preset.glow.replace(/\d*\.?\d+\)$/, `${glowOpacity.toFixed(2)})`));
+  document.documentElement.style.setProperty("--chrome-bg-width", `${canvasWidth}px`);
+  document.documentElement.style.setProperty("--chrome-bg-height", `${canvasHeight}px`);
   document.documentElement.style.setProperty("--chrome-bg-x", `${bgX}px`);
   document.documentElement.style.setProperty("--chrome-bg-y", `${bgY}px`);
 }
 
-function applySidebarFallbackGradient() {
+function applySidebarFallbackGradient(presetId?: ChromeGradientPreset | null) {
   applySidebarPositionGradient(
     { x: window.screenX || 0, y: window.screenY || 0 },
     null,
-    { width: window.outerWidth || window.innerWidth, height: window.outerHeight || window.innerHeight }
+    { width: window.outerWidth || window.innerWidth, height: window.outerHeight || window.innerHeight },
+    presetId
   );
 }
 
@@ -294,7 +396,8 @@ export function App() {
     terminal_background_image_data_url: null,
     terminal_background_opacity: 35,
     terminal_background_apply_workspace: true,
-    terminal_background_apply_home: false
+    terminal_background_apply_home: false,
+    chrome_gradient_preset: "codex_cyan"
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
@@ -350,6 +453,7 @@ export function App() {
   const previousSystemSnapshotRef = useRef<SystemSnapshot | null>(null);
   const systemSyncInFlightRef = useRef(false);
   const systemSyncFailureCountRef = useRef(0);
+  const chromeGradientPresetRef = useRef<ChromeGradientPreset>("codex_cyan");
   const latencyTimeoutCountRef = useRef<Record<string, number>>({});
   const draggedProfileIdRef = useRef<string | null>(null);
   const draggedTabProfileIdRef = useRef<string | null>(null);
@@ -416,6 +520,8 @@ export function App() {
   const markSessionDisconnected = useCallback((sessionId: string, reason: string) => {
     const state: SessionInfo["state"] = { Failed: { reason } };
     latencyTimeoutCountRef.current[sessionId] = 0;
+    delete pendingInteractiveLatencyRef.current[sessionId];
+    delete interactiveLatencySamplesRef.current[sessionId];
     setLatencyMs(null);
     setLatencyStatus("断开");
     setSessions((current) =>
@@ -550,24 +656,19 @@ export function App() {
 
   useEffect(() => {
     if (!isDesktopRuntime) {
-      document.documentElement.style.setProperty("--sidebar-top-hue", "226");
-      document.documentElement.style.setProperty("--sidebar-mid-hue", "350");
-      document.documentElement.style.setProperty("--sidebar-bottom-hue", "24");
+      applySidebarFallbackGradient(chromeGradientPresetRef.current);
       return;
     }
-
-    void getCurrentWindow().setBackgroundColor("#f6f7fb").catch(() => undefined);
-    void getCurrentWebview().setBackgroundColor("#f6f7fb").catch(() => undefined);
 
     let unlisten: (() => void) | undefined;
     let unlistenResize: (() => void) | undefined;
     let monitor: Monitor | null = null;
     let windowSize: PhysicalSize | null = null;
     let windowPosition: PhysicalPosition | null = null;
-    let pollTimer: number | undefined;
+    let rafId: number | undefined;
     let disposed = false;
 
-    const updateFromCurrentPosition = async () => {
+    const syncGradient = async () => {
       try {
         const appWindow = getCurrentWindow();
         monitor = await currentMonitor();
@@ -575,64 +676,65 @@ export function App() {
         if (!disposed) {
           windowPosition = position;
           windowSize = size;
-          applySidebarPositionGradient(position, monitor, size);
+          applySidebarPositionGradient(position, monitor, size, chromeGradientPresetRef.current);
         }
       } catch {
         if (!disposed) {
-          applySidebarFallbackGradient();
+          applySidebarFallbackGradient(chromeGradientPresetRef.current);
         }
       }
     };
 
-    void updateFromCurrentPosition();
+    const scheduleSync = () => {
+      if (disposed || rafId !== undefined) {
+        return;
+      }
+      rafId = window.requestAnimationFrame(() => {
+        rafId = undefined;
+        void syncGradient();
+      });
+    };
+
+    scheduleSync();
     void getCurrentWindow().onMoved(({ payload }) => {
       windowPosition = payload;
-      applySidebarPositionGradient(payload, monitor, windowSize);
-      void currentMonitor().then((nextMonitor) => {
-        if (disposed || !windowPosition) {
-          return;
-        }
-        monitor = nextMonitor;
-        applySidebarPositionGradient(windowPosition, monitor, windowSize);
-      });
+      scheduleSync();
     }).then((dispose) => {
       unlisten = dispose;
     });
     void getCurrentWindow().onResized(({ payload }) => {
       windowSize = payload;
+      scheduleSync();
     }).then((dispose) => {
       unlistenResize = dispose;
     });
-    pollTimer = window.setInterval(() => {
-      const appWindow = getCurrentWindow();
-      void Promise.all([appWindow.outerPosition(), appWindow.outerSize(), currentMonitor()]).then(([position, size, nextMonitor]) => {
-        if (disposed) {
-          return;
-        }
-        const moved = !windowPosition || windowPosition.x !== position.x || windowPosition.y !== position.y;
-        const resized = !windowSize || windowSize.width !== size.width || windowSize.height !== size.height;
-        monitor = nextMonitor;
-        windowPosition = position;
-        windowSize = size;
-        if (moved) {
-          applySidebarPositionGradient(position, monitor, size);
-        }
-      }).catch(() => {
-        if (!disposed) {
-          applySidebarFallbackGradient();
-        }
-      });
-    }, 90);
 
     return () => {
       disposed = true;
       unlisten?.();
       unlistenResize?.();
-      if (pollTimer) {
-        window.clearInterval(pollTimer);
+      if (rafId !== undefined) {
+        window.cancelAnimationFrame(rafId);
       }
     };
   }, []);
+
+  useEffect(() => {
+    chromeGradientPresetRef.current = layoutSettings.chrome_gradient_preset;
+    if (!isDesktopRuntime) {
+      applySidebarFallbackGradient(layoutSettings.chrome_gradient_preset);
+      return;
+    }
+    void getCurrentWindow().outerPosition()
+      .then((position) =>
+        Promise.all([currentMonitor(), getCurrentWindow().outerSize()]).then(([monitor, size]) => {
+          applySidebarPositionGradient(position, monitor, size, layoutSettings.chrome_gradient_preset);
+        })
+      )
+      .catch(() => {
+        applySidebarFallbackGradient(layoutSettings.chrome_gradient_preset);
+      });
+  }, [layoutSettings.chrome_gradient_preset]);
 
   useEffect(() => {
     if (!hasActiveTransfer) {
@@ -929,7 +1031,17 @@ export function App() {
       return;
     }
 
+    if (!isConnectedState(activeSession.state)) {
+      setLatencyMs(null);
+      setLatencyStatus("断开");
+      if (activeSession.id) {
+        latencyTimeoutCountRef.current[activeSession.id] = 0;
+      }
+      return;
+    }
+
     let cancelled = false;
+    const shouldVerifySshLatency = isLoopbackLatencyHost(target.host);
     const confirmSessionReachable = async (sessionId: string) => {
       setLatencyMs(null);
       setLatencyStatus("确认中");
@@ -994,7 +1106,7 @@ export function App() {
         if (cancelled) {
           return;
         }
-        if (value === null) {
+        if (value === null || shouldVerifySshLatency) {
           const reachable = await confirmSessionReachable(sessionId);
           if (!cancelled && !reachable) {
             failTimedOutSession(sessionId);
@@ -1028,6 +1140,7 @@ export function App() {
     activeProfile?.port,
     activeProfile?.use_terminal_latency_probe,
     activeSession?.id,
+    activeSession?.state,
     markSessionDisconnected
   ]);
 
@@ -3929,6 +4042,15 @@ function resolveLatencyTarget(profile: SessionProfile | undefined) {
   return { host: profile.host, port: profile.port };
 }
 
+function isLoopbackLatencyHost(host: string) {
+  const value = host.trim().toLowerCase();
+  return value === "localhost"
+    || value === "::1"
+    || value === "[::1]"
+    || value === "0.0.0.0"
+    || value.startsWith("127.");
+}
+
 function shouldSkipActiveLatencyProbe(
   sessionId: string,
   now: number,
@@ -5324,14 +5446,20 @@ function AppSettingsWorkspace({
               <section>
                 <strong>主题</strong>
                 <div className="appearance-options">
-                  <button className="appearance-swatch active">
-                    <span style={{ background: "#ffffff" }} />
-                    Codex White
-                  </button>
-                  <button className="appearance-swatch" disabled>
-                    <span style={{ background: "#111827" }} />
-                    Dark
-                  </button>
+                  {CHROME_GRADIENT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`appearance-swatch ${layout.chrome_gradient_preset === preset.id ? "active" : ""}`}
+                      onClick={() => onLayoutChange({ chrome_gradient_preset: preset.id })}
+                    >
+                      <span style={{ background: `linear-gradient(135deg, ${preset.stops[0]}, ${preset.stops[1]} 56%, ${preset.stops[2]})` }} />
+                      <span className="appearance-swatch-copy">
+                        <strong>{preset.name}</strong>
+                        <small>{preset.description}</small>
+                      </span>
+                    </button>
+                  ))}
                 </div>
               </section>
               <section>
@@ -5846,4 +5974,3 @@ function SshSettingsDialog({
     </div>
   );
 }
-

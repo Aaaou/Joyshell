@@ -26,6 +26,13 @@ export type CommandSnippet = {
   tags: string[];
 };
 
+export type ChromeGradientPreset =
+  | "codex_cyan"
+  | "cool_blues"
+  | "green_beach"
+  | "slight_ocean_view"
+  | "perfect_blue";
+
 export type LayoutSettings = {
   restore_last_layout: boolean;
   default_left_sidebar_open: boolean;
@@ -41,6 +48,7 @@ export type LayoutSettings = {
   terminal_background_opacity: number;
   terminal_background_apply_workspace: boolean;
   terminal_background_apply_home: boolean;
+  chrome_gradient_preset: ChromeGradientPreset;
 };
 
 export type SessionInfo = {

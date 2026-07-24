@@ -44,6 +44,7 @@ pub struct LayoutSettings {
     pub terminal_background_opacity: u8,
     pub terminal_background_apply_workspace: bool,
     pub terminal_background_apply_home: bool,
+    pub chrome_gradient_preset: String,
 }
 
 impl Default for LayoutSettings {
@@ -63,6 +64,7 @@ impl Default for LayoutSettings {
             terminal_background_opacity: 35,
             terminal_background_apply_workspace: true,
             terminal_background_apply_home: true,
+            chrome_gradient_preset: "codex_cyan".to_string(),
         }
     }
 }
@@ -511,12 +513,13 @@ impl ProfileRepository {
                                last_right_sidebar_open,
                                last_bottom_panel_open,
                                use_icmp_latency_probe,
-                               skip_delete_confirmations,
-                               splash_center_image_data_url,
-                               terminal_background_image_data_url,
-                               terminal_background_opacity,
-                               terminal_background_apply_workspace,
-                               terminal_background_apply_home
+                        skip_delete_confirmations,
+                        splash_center_image_data_url,
+                        terminal_background_image_data_url,
+                        terminal_background_opacity,
+                        terminal_background_apply_workspace,
+                        terminal_background_apply_home,
+                        chrome_gradient_preset
                         from layout_settings
                         where id = 'default'
                         ",
@@ -537,6 +540,7 @@ impl ProfileRepository {
                                 terminal_background_opacity: row.get(11)?,
                                 terminal_background_apply_workspace: row.get(12)?,
                                 terminal_background_apply_home: row.get(13)?,
+                                chrome_gradient_preset: row.get(14)?,
                             })
                         },
                     )
@@ -574,9 +578,10 @@ impl ProfileRepository {
                         terminal_background_opacity,
                         terminal_background_apply_workspace,
                         terminal_background_apply_home,
+                        chrome_gradient_preset,
                         updated_at
                     )
-                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
+                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))
                     on conflict(id) do update set
                         restore_last_layout = excluded.restore_last_layout,
                         default_left_sidebar_open = excluded.default_left_sidebar_open,
@@ -592,6 +597,7 @@ impl ProfileRepository {
                         terminal_background_opacity = excluded.terminal_background_opacity,
                         terminal_background_apply_workspace = excluded.terminal_background_apply_workspace,
                         terminal_background_apply_home = excluded.terminal_background_apply_home,
+                        chrome_gradient_preset = excluded.chrome_gradient_preset,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -609,6 +615,7 @@ impl ProfileRepository {
                         settings.terminal_background_opacity,
                         settings.terminal_background_apply_workspace,
                         settings.terminal_background_apply_home,
+                        settings.chrome_gradient_preset,
                     ],
                 )?;
                 Ok(settings)
@@ -684,6 +691,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             terminal_background_opacity integer not null default 35,
             terminal_background_apply_workspace integer not null default 1,
             terminal_background_apply_home integer not null default 1,
+            chrome_gradient_preset text not null default 'codex_cyan',
             updated_at text not null default (datetime('now'))
         );
         ",
@@ -747,7 +755,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_layout_column(
         connection,
         "terminal_background_opacity",
-        "integer not null default 28",
+        "integer not null default 35",
     )?;
     ensure_layout_column(
         connection,
@@ -757,7 +765,12 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_layout_column(
         connection,
         "terminal_background_apply_home",
-        "integer not null default 0",
+        "integer not null default 1",
+    )?;
+    ensure_layout_column(
+        connection,
+        "chrome_gradient_preset",
+        "text not null default 'codex_cyan'",
     )?;
     ensure_table_column(
         connection,
