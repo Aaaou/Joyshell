@@ -14,9 +14,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Aaaou/Joyshell/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/Aaaou/Joyshell?style=flat-square&logo=github&label=Stars"></a>
+  <a href="https://github.com/Aaaou/Joyshell/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/Aaaou/Joyshell?style=social&cacheSeconds=300"></a>
   <a href="https://github.com/Aaaou/Joyshell/network/members"><img alt="GitHub Forks" src="https://img.shields.io/github/forks/Aaaou/Joyshell?style=flat-square&logo=github&label=Forks"></a>
-  <a href="https://github.com/Aaaou/Joyshell/releases"><img alt="Latest Release" src="https://img.shields.io/github/v/release/Aaaou/Joyshell?style=flat-square&display_name=tag&sort=semver"></a>
+  <a href="https://github.com/Aaaou/Joyshell/releases"><img alt="Latest Release" src="https://img.shields.io/github/v/release/Aaaou/Joyshell?style=flat-square&display_name=tag&sort=semver&cacheSeconds=300"></a>
   <a href="https://github.com/Aaaou/Joyshell/issues"><img alt="Open Issues" src="https://img.shields.io/github/issues/Aaaou/Joyshell?style=flat-square"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-2f855a?style=flat-square"></a>
 </p>
