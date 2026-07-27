@@ -2,6 +2,18 @@
 
 调研日期：2026-07-21
 
+实现更新：2026-07-27。仓库已经采用本文推荐的 `Tauri 2 + React/TypeScript + Rust + xterm.js + SQLite` 路线；SSH/SFTP 后端当前使用 `ssh2-rs/libssh2`。Windows `0.1.52` NSIS/MSI 已构建，macOS/Linux 仍待实机验证。本文其余内容保留为选型背景，不代表所有列出的功能已经实现。
+
+### 同一服务器多 Shell 的源码结论
+
+`0.1.51` 针对已连接服务器双击和同服务器多开，复核了以下固定提交：
+
+- Electerm `02925cb811366190613484f9d95d077be27767a0`：bookmark 通过 `srcId` 关联保存配置，`newTerm()`/`addTab()` 为每次打开创建新的 tab 实例。
+- Tabby `14e2d60b9b6dee84a53c37f05eefeb803787de04`：`SSHProfile`、`SSHTabComponent`、`SSHShellSession` 与底层 `SSHSession` 分层；`setupOneSession()` 明确控制是否复用/多路复用底层连接，duplicate tab 也创建新的 tab。
+- Termora `712a3168ebae86b12647989dc1285718a0b11ec9`：`OpenHostAction` 每次经 provider 创建 `TerminalTab`，重连时在原 tab 索引创建替代 runtime tab。
+
+Joyshell 因而采用 `ProfileId -> ShellId -> Runtime SessionId`。当前 `ShellId` 与 `Runtime SessionId` 一一对应，一个 Profile 可拥有多个独立连接；关闭一个 Shell 不会断开同 Profile 的其他 Shell。初版不默认复用交互式 SSH 传输层，以隔离阻塞、断线和终端状态。已连接服务器双击默认激活最早打开的已连接 Shell，也可在常规设置切换为新建独立 SSH 连接。
+
 目标：开发一款 UI、主题、操控性和功能接近 FinalShell，但性能和内存占用尽量接近 MobaXterm 的 SSH 客户端。首期目标平台为 Windows、macOS、Linux Debian/Ubuntu，后续评估 Android 与 iOS。
 
 ## 1. 结论先行

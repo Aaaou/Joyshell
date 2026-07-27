@@ -3,7 +3,7 @@
 ## Source
 
 - Font family page: https://www.iconfont.cn/fonts/detail?spm=a313x.fonts_index.i1.d9df05512.443b3a81QAnOD4&cnid=pOvFIr086ADR
-- Local archive used for review: `D:\Download\阿里妈妈方圆体.zip`
+- Bundled source/license files: `apps/desktop/src/assets/fonts/alimama-fangyuan/`
 
 ## Source Files
 
@@ -43,3 +43,4 @@ The font is used as the primary UI text font for the desktop app shell.
 Monospace terminal rendering remains separate and is not replaced by this font.
 
 Before public release, re-check the upstream license terms for generated/static embedded instances and keep this attribution in third-party notices.
+The repository should publish a root `THIRD_PARTY_NOTICES` file before distribution; this component note is an engineering record, not legal advice.

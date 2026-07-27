@@ -25,10 +25,12 @@ Main files:
 - `crates/joyshell-core/src/session.rs`
 - `crates/joyshell-core/examples/sftp_probe.rs`
 - `apps/desktop/src-tauri/src/lib.rs`
-- `apps/desktop/src/bridge.ts`
+- `apps/desktop/src/platform/runtime-client.ts`
 - `apps/desktop/src/types.ts`
-- `apps/desktop/src/ui/App.tsx`
-- `apps/desktop/src/styles.css`
+- `apps/desktop/src/app/JoyshellApp.tsx`
+- `apps/desktop/src/features/sftp/path-model.ts`
+- `apps/desktop/src/features/transfers/use-transfer-runtime.ts`
+- `apps/desktop/src/styles/workspace.css`
 
 ## Mature References
 
@@ -43,15 +45,15 @@ Reference material:
 
 ## Design
 
-The browser reuses the authenticated SSH session instead of opening a second login path.
+The browser reuses the saved profile credentials but opens an independent side SSH session. It does not run blocking SFTP work on the interactive terminal worker.
 
 Flow:
 
 1. UI asks Tauri for `sftp_list_directory`.
-2. Rust sends a control message to the SSH worker.
-3. The worker opens an SFTP handle on the active session.
+2. Rust obtains the connected profile runtime and opens a side SSH session in `spawn_blocking`.
+3. The side session opens an SFTP subsystem and performs the requested operation.
 4. Directory entries are parsed into `RemoteDirectoryListing`.
-5. File operations run through the same worker and emit `SftpProgress`.
+5. File operations emit `SftpProgress` through the shared session event stream.
 6. The UI renders the remote listing and transfer queue.
 
 ## Supported Operations
@@ -85,10 +87,10 @@ Flow:
 
 ## Implementation Notes
 
-- The worker uses explicit control messages instead of injecting shell commands into the visible terminal.
+- SFTP uses a side connection instead of injecting shell commands into the visible terminal.
 - Remote paths are normalized to POSIX style before calling libssh2 SFTP APIs.
 - Progress events are emitted through the existing `session:event` channel so the UI can show transfer state without polling.
-- Upload and download are synchronous within the SSH worker for now. This is acceptable for the initial desktop MVP, but very large transfers may later deserve a dedicated transfer worker.
+- Upload and download are blocking inside their own `spawn_blocking` side-session task, so they do not block terminal input. A persistent per-profile transfer worker remains future work.
 - Listing filters out `.` and `..` and sorts directories before files.
 - Permissions are formatted in `ls -l` style for quick scanning.
 - inode data is not part of SFTP itself; this component does not fabricate inode fields.
@@ -103,21 +105,19 @@ Flow:
 Run against the Cloudflare tunnel endpoint:
 
 ```powershell
-$env:OPENSSL_DIR='D:\miniconda3\Library'
 $env:JOYSHELL_SSH_HOST='127.0.0.1'
-$env:JOYSHELL_SSH_USER='root'
-$env:JOYSHELL_SSH_PASSWORD='yujiarong520'
+$env:JOYSHELL_SSH_USER='test-user'
+$env:JOYSHELL_SSH_PASSWORD='<password>'
 $env:JOYSHELL_SSH_PORT='2222'
 C:\Users\EDY\.cargo\bin\cargo.exe run -p joyshell-core --example sftp_probe
 ```
 
-Run against the LAN test host:
+Run against a direct SSH host:
 
 ```powershell
-$env:OPENSSL_DIR='D:\miniconda3\Library'
-$env:JOYSHELL_SSH_HOST='192.168.110.24'
-$env:JOYSHELL_SSH_USER='root'
-$env:JOYSHELL_SSH_PASSWORD='yujiarong520'
+$env:JOYSHELL_SSH_HOST='ssh.example.internal'
+$env:JOYSHELL_SSH_USER='test-user'
+$env:JOYSHELL_SSH_PASSWORD='<password>'
 $env:JOYSHELL_SSH_PORT='22'
 C:\Users\EDY\.cargo\bin\cargo.exe run -p joyshell-core --example sftp_probe
 ```
@@ -135,4 +135,4 @@ Expected output includes:
 1. Add multi-select and batch transfer queue.
 2. Add recursive directory upload/download.
 3. Add file editor/viewer for text files.
-4. Add resumable transfers and persistent queue state.
+4. Persist queue descriptors so retry/resume can survive application restart.

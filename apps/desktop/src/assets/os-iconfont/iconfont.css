@@ -1,0 +1,46 @@
+@font-face {
+  font-family: "iconfont"; /* Project id 5215323 */
+  src: url('iconfont.woff2?t=1784861685969') format('woff2'),
+       url('iconfont.woff?t=1784861685969') format('woff'),
+       url('iconfont.ttf?t=1784861685969') format('truetype');
+}
+
+.iconfont {
+  font-family: "iconfont" !important;
+  font-size: 16px;
+  font-style: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.icon-icon-test:before {
+  content: "\e612";
+}
+
+.icon-windows:before {
+  content: "\ea06";
+}
+
+.icon-macos:before {
+  content: "\e642";
+}
+
+.icon-alpine:before {
+  content: "\e6ec";
+}
+
+.icon-Ubuntu:before {
+  content: "\ef63";
+}
+
+.icon-centos-stream:before {
+  content: "\e600";
+}
+
+.icon-fedora:before {
+  content: "\e601";
+}
+
+.icon-freebsd:before {
+  content: "\e6e9";
+}

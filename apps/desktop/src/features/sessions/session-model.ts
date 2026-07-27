@@ -2,6 +2,38 @@ import type { LayoutSettings, SessionFolder, SessionProfile } from "../../types"
 
 export type SidebarSortMode = "custom" | "name" | "host";
 
+export type ProfileDoubleClickDecision =
+  | { kind: "activate"; shellId: string }
+  | { kind: "create" }
+  | { kind: "connect"; shellId?: string };
+
+export function resolveProfileDoubleClickDecision({
+  profileId,
+  openShellIds,
+  shellProfileIds,
+  connectedSessionIds,
+  action
+}: {
+  profileId: string;
+  openShellIds: string[];
+  shellProfileIds: Record<string, string>;
+  connectedSessionIds: ReadonlySet<string>;
+  action: LayoutSettings["connected_profile_double_click_action"];
+}): ProfileDoubleClickDecision {
+  const profileShellIds = openShellIds.filter(
+    (shellId) => (shellProfileIds[shellId] ?? shellId) === profileId
+  );
+  const earliestConnectedShellId = profileShellIds.find((shellId) => connectedSessionIds.has(shellId));
+
+  if (earliestConnectedShellId) {
+    return action === "new_session"
+      ? { kind: "create" }
+      : { kind: "activate", shellId: earliestConnectedShellId };
+  }
+
+  return { kind: "connect", shellId: profileShellIds[0] };
+}
+
 export function createBlankProfile(name = "新建服务器", group: string | null = null): SessionProfile {
   return {
     id: crypto.randomUUID(),
@@ -12,6 +44,7 @@ export function createBlankProfile(name = "新建服务器", group: string | nul
     latency_probe_host: null,
     latency_probe_port: null,
     use_terminal_latency_probe: false,
+    operating_system: null,
     username: "",
     tags: [],
     favorite: false,
@@ -258,16 +291,44 @@ export function findTabDropIndicator(clientX: number, draggedId: string) {
   return { targetId: tabs.at(-1)?.dataset.tabProfileId ?? null, position: "after" as const };
 }
 
-export function inferProfileOs(profile: SessionProfile) {
-  const text = `${profile.name} ${profile.host} ${profile.tags.join(" ")} ${profile.group ?? ""}`.toLowerCase();
-  if (text.includes("win")) {
-    return { label: "WIN", tone: "windows" };
+export function resolveProfileOperatingSystem(profile: SessionProfile) {
+  const osName = profile.operating_system?.trim() ?? "";
+  const normalized = osName.toLowerCase();
+  if (normalized.includes("windows")) {
+    return { label: "Windows", shortLabel: "WIN", tone: "windows", symbolId: "icon-windows" };
   }
-  if (text.includes("mac") || text.includes("darwin")) {
-    return { label: "MAC", tone: "mac" };
+  if (normalized.includes("macos") || normalized.includes("mac os") || normalized.includes("darwin")) {
+    return { label: "macOS", shortLabel: "MAC", tone: "mac", symbolId: "icon-macos" };
   }
-  if (text.includes("ubuntu") || text.includes("debian") || text.includes("linux") || text.includes("centos")) {
-    return { label: "LIN", tone: "linux" };
+  if (normalized.includes("ubuntu")) {
+    return { label: "Ubuntu", shortLabel: "UBU", tone: "linux", symbolId: "icon-Ubuntu" };
   }
-  return { label: "SSH", tone: "unknown" };
+  if (normalized.includes("alpine")) {
+    return { label: "Alpine", shortLabel: "ALP", tone: "linux", symbolId: "icon-alpine" };
+  }
+  if (normalized.includes("centos")) {
+    return { label: "CentOS", shortLabel: "COS", tone: "linux", symbolId: "icon-centos-stream" };
+  }
+  if (normalized.includes("fedora")) {
+    return { label: "Fedora", shortLabel: "FED", tone: "linux", symbolId: "icon-fedora" };
+  }
+  if (normalized.includes("freebsd")) {
+    return { label: "FreeBSD", shortLabel: "BSD", tone: "bsd", symbolId: "icon-freebsd" };
+  }
+  if (
+    normalized.includes("red hat")
+    || normalized.includes("rhel")
+    || normalized.includes("rocky")
+    || normalized.includes("alma")
+    || normalized.includes("oracle linux")
+  ) {
+    return { label: osName || "Red Hat", shortLabel: "RHL", tone: "linux", symbolId: "icon-icon-test" };
+  }
+  if (normalized.includes("debian")) {
+    return { label: "Debian", shortLabel: "DEB", tone: "linux", symbolId: null };
+  }
+  if (normalized.includes("linux")) {
+    return { label: osName || "Linux", shortLabel: "LIN", tone: "linux", symbolId: null };
+  }
+  return { label: osName || "Unknown OS", shortLabel: "OS", tone: "unknown", symbolId: null };
 }

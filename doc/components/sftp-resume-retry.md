@@ -36,7 +36,8 @@ Implemented in `crates/joyshell-core/src/session.rs`:
 - SFTP transfer timeout is separated as `60s`.
 - SFTP transfer retry limit is `4` attempts.
 - Retry backoff is `900ms * (attempt - 1)`.
-- Transfer chunk size remains `64 KiB`.
+- Transfer chunk size is `128 KiB`.
+- Progress emission is throttled to at most every `120ms` or every `1 MiB`, whichever is reached first.
 
 Download resume:
 
@@ -78,7 +79,7 @@ For now the intended control model is:
 
 ## Current Limits
 
-This is resume-within-current-session. If the underlying SSH session becomes unusable, retries may still fail. A later queue worker should support full reconnect-and-resume:
+Each transfer attempt can reopen its side SSH/SFTP session, but the queue itself is not durable. If profile/session credentials become unavailable or the application exits, retries stop. A later queue worker should support full reconnect-and-resume:
 
 - store transfer descriptors durably,
 - reconnect SSH/SFTP with the saved profile,

@@ -41,9 +41,9 @@ Backend changes in `crates/joyshell-core/src/session.rs`:
 
 ## Credential Handling
 
-For the MVP, `SessionRuntime` keeps a clone of `SessionProfile` and the password in memory so side sessions can authenticate without prompting for every SFTP operation.
+For the MVP, `SessionRuntime` keeps a clone of `SessionProfile` and the decrypted password in process memory so side sessions can authenticate without prompting for every SFTP operation. The password is persisted separately as AES-256-GCM ciphertext in SQLite and decrypted into memory when connecting.
 
-This is not persisted to SQLite and should be replaced later by a credential-provider abstraction:
+The local encryption mechanism should later be replaced by a credential-provider abstraction:
 
 - Windows Credential Manager,
 - macOS Keychain,
@@ -89,7 +89,7 @@ Reference behavior:
 
 Current Joyshell mitigation:
 
-- SFTP transfer buffer increased from `64 KiB` to `128 KiB`.
+- SFTP transfer buffer is `128 KiB`.
 - Frontend progress events are throttled to at most every `120ms` or every `1 MiB` of transferred data.
 - Terminal and SFTP are still isolated through side SSH sessions.
 - Transfer speed display uses a smoothed instantaneous rate when enough sample time has elapsed.

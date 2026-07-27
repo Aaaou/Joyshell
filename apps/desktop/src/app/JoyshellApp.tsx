@@ -1,7 +1,5 @@
-import { JoyTerminal, type JoyTerminalHandle } from "@joyshell/terminal";
-import { listen } from "@tauri-apps/api/event";
+import { JoyTerminal } from "@joyshell/terminal";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -42,13 +40,13 @@ import {
   X
 } from "lucide-react";
 import { FileKindIcon } from "../ui/FileKindIcon";
+import { OperatingSystemIcon } from "../ui/OperatingSystemIcon";
 import { DangerConfirmDialog } from "../features/dialogs/DangerConfirmDialog";
 import { TextInputDialog } from "../features/dialogs/TextInputDialog";
 import { JoyshellSplash } from "../features/splash/JoyshellSplash";
 import type {
   CommandSnippet,
   ChromeGradientPreset,
-  LayoutSettings,
   RemoteDirectoryListing,
   RemoteFileEntry,
   SessionInfo,
@@ -58,11 +56,14 @@ import type {
   SystemSnapshot
 } from "../types";
 import { desktopClient, isDesktopRuntime } from "../platform/desktop-client";
-import type { SessionEvent as SessionEventPayload } from "../shared/events/session-events";
+import { useSessionEvents } from "../platform/use-session-events";
 import {
   CHROME_GRADIENT_PRESETS
 } from "../shell/chrome-gradient";
+import { useBottomPanelResize } from "../shell/use-bottom-panel-resize";
 import { useChromeGradient } from "../shell/use-chrome-gradient";
+import { useLayoutController } from "../shell/use-layout-controller";
+import { useWindowControls } from "../shell/use-window-controls";
 import {
   buildProfileGroups,
   createBlankProfile,
@@ -70,12 +71,12 @@ import {
   createUniqueFolderName,
   findProfileDropIndicator,
   findTabDropIndicator,
-  inferProfileOs,
+  resolveProfileOperatingSystem,
   moveProfileWithinCurrentGroup,
   normalizeProfileSortOrders,
   profileMatchesSearch,
   reorderProfileByPointer,
-  resolveStartupLayout
+  resolveProfileDoubleClickDecision
 } from "../features/sessions/session-model";
 import {
   buildSystemInfoClipboard,
@@ -92,8 +93,8 @@ import {
   usagePercent,
   type SystemDerivedStats
 } from "../features/system-info/system-model";
-const clientBuildLabel = "0.1.42 conservative-ui-decoupling-20260724";
-const COLLAPSED_SESSION_FOLDERS_STORAGE_KEY = "joyshell:collapsed-session-folders:v1";
+import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
+const clientBuildLabel = "0.1.52";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -113,7 +114,6 @@ async function readImageFileAsDataUrl(file: File) {
 }
 
 const READY_TERMINAL_OUTPUT = "Joyshell is ready. Add an SSH connection, then click Connect.\r\n";
-const TERMINAL_CACHE_LIMIT = 2 * 1024 * 1024;
 const INTERACTIVE_LATENCY_IDLE_MS = 2500;
 const TERMINAL_OUTPUT_BUSY_MS = 1200;
 const INTERACTIVE_LATENCY_MAX_MS = 5000;
@@ -134,6 +134,7 @@ type ContextMenuState = {
   y: number;
   transferId?: string;
   profileId?: string;
+  shellId?: string;
   folderId?: string;
 };
 
@@ -189,7 +190,10 @@ import type { SidebarSortMode } from "../features/sessions/session-model";
 import { ConnectionHome } from "../features/home/ConnectionHome";
 import { CommandLibraryPanel } from "../features/commands/CommandLibraryPanel";
 import { SshSettingsDialog } from "../features/sessions/SshSettingsDialog";
+import { loadCollapsedSessionFolders, saveCollapsedSessionFolders } from "../features/sessions/folder-preferences";
 import { AppSettingsWorkspace } from "../features/settings/AppSettingsWorkspace";
+import { useSplashLifecycle } from "../features/splash/use-splash-lifecycle";
+import { buildPathCrumbs, joinRemotePath, remoteBasename, remoteParentDir } from "../features/sftp/path-model";
 import {
   buildTransferTelemetry,
   createTransferProgress,
@@ -203,9 +207,10 @@ import {
   isConnectedState,
   isTransferActive,
   latencyTone,
-  TransferMetric,
-  type TransferStats
+  TransferMetric
 } from "../features/transfers/transfer-model";
+import { useTransferClock } from "../features/transfers/use-transfer-clock";
+import { useTransferRuntime } from "../features/transfers/use-transfer-runtime";
 
 const {
   collectSystemSnapshot,
@@ -225,7 +230,6 @@ const {
   revealLocalPath,
   saveCommandSnippet,
   saveFolder,
-  saveLayoutSettings,
   saveProfile,
   sessionDiagnostics,
   sftpCreateDir,
@@ -235,7 +239,6 @@ const {
   sftpRenamePath,
   sftpUploadFile,
   terminalOutputTail,
-  writeClipboardText: writeDesktopClipboardText,
   writeTerminal
 } = desktopClient;
 import {
@@ -245,6 +248,13 @@ import {
   resolveLatencyTarget,
   shouldSkipActiveLatencyProbe
 } from "../features/terminal/latency-model";
+import {
+  buildConnectingTerminalSeed,
+  buildFailedTerminalSeed,
+  buildSelectedProfileSeed,
+  trimCpuName
+} from "../features/terminal/terminal-model";
+import { useTerminalRuntime } from "../features/terminal/use-terminal-runtime";
 
 export function App() {
   const [profiles, setProfiles] = useState<SessionProfile[]>([]);
@@ -252,36 +262,38 @@ export function App() {
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   const [collapsedSessionFolderIds, setCollapsedSessionFolderIds] = useState<Set<string>>(() => loadCollapsedSessionFolders());
   const [openProfileIds, setOpenProfileIds] = useState<string[]>([]);
+  const [shellProfileIds, setShellProfileIds] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(true);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
-  const [layoutSettings, setLayoutSettings] = useState<LayoutSettings>({
-    restore_last_layout: false,
-    default_left_sidebar_open: true,
-    default_right_sidebar_open: true,
-    default_bottom_panel_open: true,
-    last_left_sidebar_open: true,
-    last_right_sidebar_open: true,
-    last_bottom_panel_open: true,
-    use_icmp_latency_probe: false,
-    skip_delete_confirmations: false,
-    splash_center_image_data_url: null,
-    terminal_background_image_data_url: null,
-    terminal_background_opacity: 35,
-    terminal_background_apply_workspace: true,
-    terminal_background_apply_home: false,
-    chrome_gradient_preset: "codex_cyan"
+  const [notice, setNotice] = useState<string | null>(null);
+  const flash = useCallback((message: string) => {
+    setNotice(message);
+    window.setTimeout(() => setNotice(null), 1800);
+  }, []);
+  const {
+    state: { assistantOpen, sidebarCollapsed, bottomPanelOpen, bottomPanelHeight, layoutSettings },
+    actions: {
+      applyLoadedLayout,
+      setLeftSidebarOpen,
+      setRightSidebarOpen,
+      setBottomPanelPreferenceOpen,
+      previewBottomPanelHeight,
+      commitBottomPanelHeight,
+      updateLayoutSettings
+    }
+  } = useLayoutController(flash);
+  const bottomPanelResize = useBottomPanelResize({
+    height: bottomPanelHeight,
+    onHeightChange: previewBottomPanelHeight,
+    onHeightCommit: commitBottomPanelHeight,
+    onCollapse: () => setBottomPanelPreferenceOpen(false)
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [appSettingsPage, setAppSettingsPage] = useState<"general" | "appearance">("general");
   const [systemDialogOpen, setSystemDialogOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<SessionProfile | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [windowMaximized, setWindowMaximized] = useState(false);
   const [commandDraft, setCommandDraft] = useState("");
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const [activeBottomView, setActiveBottomView] = useState<"files" | "commands">("files");
@@ -292,8 +304,6 @@ export function App() {
   const [commandSendMode, setCommandSendMode] = useState<"current" | "all" | "selected">("current");
   const [selectedCommandTargets, setSelectedCommandTargets] = useState<Record<string, boolean>>({});
   const [terminalInputCount, setTerminalInputCount] = useState(0);
-  const [splashVisible, setSplashVisible] = useState(true);
-  const [splashClosing, setSplashClosing] = useState(false);
   const [systemSnapshot, setSystemSnapshot] = useState<SystemSnapshot | null>(null);
   const [systemDerived, setSystemDerived] = useState<SystemDerivedStats>(emptySystemDerived);
   const [systemStatus, setSystemStatus] = useState("等待连接");
@@ -304,10 +314,9 @@ export function App() {
   const [selectedRemotePath, setSelectedRemotePath] = useState<string | null>(null);
   const [sftpBusy, setSftpBusy] = useState(false);
   const [sftpStatus, setSftpStatus] = useState("等待连接");
-  const [transfers, setTransfers] = useState<SftpProgress[]>([]);
-  const [transferStats, setTransferStats] = useState<Record<string, TransferStats>>({});
-  const [transferClockNow, setTransferClockNow] = useState(() => Date.now());
-  const [cancellingTransfers, setCancellingTransfers] = useState<Record<string, boolean>>({});
+  const transferRuntime = useTransferRuntime();
+  const { transfers, transferStats, cancellingTransfers, hasActiveTransfer } = transferRuntime.state;
+  const { markTransferFailed, removeTransfer: removeTransferRecord, setCancellingTransfers, upsertTransfer } = transferRuntime.actions;
   const [sftpDropActive, setSftpDropActive] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
@@ -318,13 +327,10 @@ export function App() {
   const [remoteNameDraft, setRemoteNameDraft] = useState("");
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   const [dragIndicator, setDragIndicator] = useState<DragIndicator | null>(null);
-  const [terminalSeed, setTerminalSeed] = useState(READY_TERMINAL_OUTPUT);
-  const terminalRef = useRef<JoyTerminalHandle | null>(null);
-  const fileRegionRef = useRef<HTMLElement | null>(null);
-  const terminalMirrorRef = useRef(terminalSeed);
-  const terminalCacheRef = useRef<Record<string, string>>({ empty: READY_TERMINAL_OUTPUT });
-  const terminalDisconnectNoticeRef = useRef<Record<string, string>>({});
   const activeProfileIdRef = useRef<string | null>(null);
+  const profilesRef = useRef<SessionProfile[]>([]);
+  const shellProfileIdsRef = useRef<Record<string, string>>({});
+  const fileRegionRef = useRef<HTMLElement | null>(null);
   const previousSystemSnapshotRef = useRef<SystemSnapshot | null>(null);
   const systemSyncInFlightRef = useRef(false);
   const systemSyncFailureCountRef = useRef(0);
@@ -337,59 +343,59 @@ export function App() {
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const dragIndicatorRef = useRef<DragIndicator | null>(null);
   const suppressNextClickRef = useRef(false);
-  const profilesRef = useRef<SessionProfile[]>([]);
-  const lastTerminalInputAtRef = useRef<Record<string, number>>({});
-  const lastTerminalOutputAtRef = useRef<Record<string, number>>({});
-  const pendingInteractiveLatencyRef = useRef<Record<string, number>>({});
-  const interactiveLatencySamplesRef = useRef<Record<string, number[]>>({});
-
-  const replaceTerminalOutput = useCallback((data: string, profileId?: string | null) => {
-    const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
-    const next = trimTerminalCache(data);
-    terminalCacheRef.current[cacheKey] = next;
-    if (cacheKey === (activeProfileIdRef.current ?? "empty")) {
-      terminalMirrorRef.current = next;
-      setTerminalSeed(next);
-      terminalRef.current?.replace(next);
-    }
+  const isTerminalLatencyProbeEnabled = useCallback(
+    (shellId: string) => {
+      const profileId = shellProfileIdsRef.current[shellId] ?? shellId;
+      return profilesRef.current.some((profile) => profile.id === profileId && profile.use_terminal_latency_probe);
+    },
+    []
+  );
+  const handleInteractiveLatencySample = useCallback((profileId: string, elapsedMs: number) => {
+    setLatencyMs(recordInteractiveLatencySample(profileId, elapsedMs, interactiveLatencySamplesRef.current));
+    setLatencyStatus("\u4ea4\u4e92\u5e73\u5747");
   }, []);
-
-  const appendTerminalOutput = useCallback((data: string, profileId?: string | null) => {
-    const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
-    const now = Date.now();
-    lastTerminalOutputAtRef.current[cacheKey] = now;
-    const pendingStartedAt = pendingInteractiveLatencyRef.current[cacheKey];
-    const latencyProfile = profilesRef.current.find((profile) => profile.id === cacheKey);
-    if (latencyProfile?.use_terminal_latency_probe && pendingStartedAt && data) {
-      const elapsed = now - pendingStartedAt;
-      if (elapsed > 0 && elapsed <= INTERACTIVE_LATENCY_MAX_MS) {
-        setLatencyMs(recordInteractiveLatencySample(cacheKey, elapsed, interactiveLatencySamplesRef.current));
-        setLatencyStatus("交互平均");
-      }
-      delete pendingInteractiveLatencyRef.current[cacheKey];
-    }
-    const next = trimTerminalCache((terminalCacheRef.current[cacheKey] ?? "") + data);
-    terminalCacheRef.current[cacheKey] = next;
-    if (cacheKey === (activeProfileIdRef.current ?? "empty")) {
-      terminalMirrorRef.current = next;
-      terminalRef.current?.write(data);
-    }
-  }, []);
-
-  const appendSessionStateNotice = useCallback((sessionId: string, state: SessionInfo["state"]) => {
-    if (isConnectedState(state) || state === "Connecting" || state === "Reconnecting") {
-      delete terminalDisconnectNoticeRef.current[sessionId];
-      return;
-    }
-
-    const reason = getDisconnectedReason(state);
-    const notice = `\r\n[disconnected] ${reason}\r\n`;
-    if (terminalDisconnectNoticeRef.current[sessionId]) {
-      return;
-    }
-    terminalDisconnectNoticeRef.current[sessionId] = notice;
-    appendTerminalOutput(notice, sessionId);
-  }, [appendTerminalOutput]);
+  const terminalRuntime = useTerminalRuntime({
+    initialOutput: READY_TERMINAL_OUTPUT,
+    isConnected: isConnectedState,
+    disconnectedReason: getDisconnectedReason,
+    isLatencyProbeEnabled: isTerminalLatencyProbeEnabled,
+    onInteractiveLatencySample: handleInteractiveLatencySample,
+    maximumInteractiveLatencyMs: INTERACTIVE_LATENCY_MAX_MS
+  });
+  const { terminalSeed } = terminalRuntime.state;
+  const {
+    terminalRef,
+    terminalMirrorRef,
+    terminalCacheRef,
+    terminalDisconnectNoticeRef,
+    lastTerminalInputAtRef,
+    lastTerminalOutputAtRef,
+    pendingInteractiveLatencyRef,
+    interactiveLatencySamplesRef
+  } = terminalRuntime.refs;
+  const {
+    appendSessionStateNotice: appendTerminalSessionStateNotice,
+    appendTerminalOutput: appendTerminalRuntimeOutput,
+    clearTerminalCache,
+    replaceTerminalOutput: replaceTerminalRuntimeOutput,
+    syncTerminalTail: syncTerminalRuntimeTail
+  } = terminalRuntime.actions;
+  const replaceTerminalOutput = useCallback(
+    (data: string, profileId?: string | null) => replaceTerminalRuntimeOutput(data, activeProfileIdRef.current, profileId),
+    [replaceTerminalRuntimeOutput]
+  );
+  const appendTerminalOutput = useCallback(
+    (data: string, profileId?: string | null) => appendTerminalRuntimeOutput(data, activeProfileIdRef.current, profileId),
+    [appendTerminalRuntimeOutput]
+  );
+  const appendSessionStateNotice = useCallback(
+    (sessionId: string, state: SessionInfo["state"]) => appendTerminalSessionStateNotice(sessionId, state, activeProfileIdRef.current),
+    [appendTerminalSessionStateNotice]
+  );
+  const syncTerminalTail = useCallback(
+    (tail: string, profileId?: string | null) => syncTerminalRuntimeTail(tail, activeProfileIdRef.current, profileId),
+    [syncTerminalRuntimeTail]
+  );
 
   const markSessionDisconnected = useCallback((sessionId: string, reason: string) => {
     const state: SessionInfo["state"] = { Failed: { reason } };
@@ -404,174 +410,10 @@ export function App() {
     appendSessionStateNotice(sessionId, state);
   }, [appendSessionStateNotice]);
 
-  const syncTerminalTail = useCallback((tail: string, profileId?: string | null) => {
-    const cacheKey = profileId ?? activeProfileIdRef.current ?? "empty";
-    const current = terminalCacheRef.current[cacheKey] ?? "";
-    if (!tail || tail === current) {
-      return;
-    }
-
-    if (tail.startsWith(current)) {
-      appendTerminalOutput(tail.slice(current.length), cacheKey);
-      return;
-    }
-
-    replaceTerminalOutput(tail, cacheKey);
-  }, [appendTerminalOutput, replaceTerminalOutput]);
-
-  const upsertTransfer = useCallback((progress: SftpProgress, replaceId?: string) => {
-    const now = Date.now();
-    setTransferStats((current) => {
-      const existing = current[progress.id] ?? (replaceId ? current[replaceId] : undefined);
-      const elapsedSeconds = existing ? Math.max((now - existing.lastAt) / 1000, 0) : 0;
-      const byteDelta = existing ? progress.bytes_done - existing.lastBytes : 0;
-      const canSampleRate = Boolean(existing) && elapsedSeconds >= 0.35 && byteDelta > 0;
-      const instantRate = canSampleRate ? byteDelta / elapsedSeconds : 0;
-      const isActive = isTransferActive(progress.status);
-      const startedAt = existing?.startedAt ?? now;
-      const averageElapsedSeconds = Math.max((now - startedAt) / 1000, 0);
-      const averageRate = isActive && averageElapsedSeconds >= 0.5 && progress.bytes_done > 0
-        ? progress.bytes_done / averageElapsedSeconds
-        : 0;
-      const rateBytesPerSecond = instantRate > 0
-        ? existing?.rateBytesPerSecond
-          ? existing.rateBytesPerSecond * 0.86 + instantRate * 0.14
-          : instantRate
-        : isActive
-          ? existing?.rateBytesPerSecond || averageRate
-          : existing?.rateBytesPerSecond ?? 0;
-      const total = progress.bytes_total ?? null;
-      const remainingBytes = total === null ? null : Math.max(total - progress.bytes_done, 0);
-      const instantEta = isActive && remainingBytes !== null && rateBytesPerSecond > 0
-        ? remainingBytes / rateBytesPerSecond
-        : null;
-      const etaSeconds = instantEta === null
-        ? isActive
-          ? existing?.etaSeconds ?? null
-          : 0
-        : existing?.etaSeconds !== null && existing?.etaSeconds !== undefined
-          ? existing.etaSeconds * 0.82 + instantEta * 0.18
-          : instantEta;
-      const next = { ...current };
-      if (replaceId && replaceId !== progress.id) {
-        delete next[replaceId];
-      }
-      next[progress.id] = {
-        startedAt,
-        lastAt: canSampleRate || !existing || !isActive ? now : existing.lastAt,
-        lastBytes: canSampleRate || !existing || !isActive ? progress.bytes_done : existing.lastBytes,
-        rateBytesPerSecond,
-        etaSeconds
-      };
-      return next;
-    });
-    setTransfers((current) => [
-      progress,
-      ...current.filter((item) => item.id !== progress.id && item.id !== replaceId)
-    ].slice(0, 20));
-    if (!isTransferActive(progress.status)) {
-      setCancellingTransfers((current) => {
-        if (!current[progress.id]) {
-          return current;
-        }
-        const next = { ...current };
-        delete next[progress.id];
-        return next;
-      });
-    }
-  }, []);
-
-  const markTransferFailed = useCallback((transferId: string, fallback: SftpProgress, reason: string) => {
-    const now = Date.now();
-    setTransferStats((current) => {
-      const existing = current[transferId];
-      return {
-        ...current,
-        [transferId]: {
-          startedAt: existing?.startedAt ?? now,
-          lastAt: now,
-          lastBytes: existing?.lastBytes ?? fallback.bytes_done,
-          rateBytesPerSecond: existing?.rateBytesPerSecond ?? 0,
-          etaSeconds: null
-        }
-      };
-    });
-    setTransfers((current) => {
-      const existing = current.find((item) => item.id === transferId) ?? fallback;
-      return [
-        { ...existing, status: { Failed: { reason } } },
-        ...current.filter((item) => item.id !== transferId)
-      ].slice(0, 20);
-    });
-    setCancellingTransfers((current) => {
-      if (!current[transferId]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[transferId];
-      return next;
-    });
-  }, []);
-
-  const hasActiveTransfer = useMemo(
-    () => transfers.some((transfer) => isTransferActive(transfer.status)),
-    [transfers]
-  );
-
   useChromeGradient(layoutSettings.chrome_gradient_preset);
 
-  useEffect(() => {
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const showTimer = window.setTimeout(() => setSplashClosing(true), reduceMotion ? 500 : 4200);
-    const hideTimer = window.setTimeout(() => setSplashVisible(false), reduceMotion ? 760 : 4700);
-    return () => {
-      window.clearTimeout(showTimer);
-      window.clearTimeout(hideTimer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!hasActiveTransfer) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setTransferClockNow(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [hasActiveTransfer]);
-
-  useEffect(() => {
-    if (!isDesktopRuntime) {
-      return;
-    }
-
-    let unlistenResize: (() => void) | undefined;
-    let disposed = false;
-    const syncMaximizedState = () => {
-      const appWindow = getCurrentWindow();
-      void appWindow.isMaximized().then((maximized) => {
-        if (!disposed) {
-          setWindowMaximized(maximized);
-        }
-      }).catch(() => {
-        if (!disposed) {
-          setWindowMaximized(false);
-        }
-      });
-    };
-
-    syncMaximizedState();
-    void getCurrentWindow().onResized(() => {
-      syncMaximizedState();
-    }).then((dispose) => {
-      unlistenResize = dispose;
-    });
-
-    return () => {
-      disposed = true;
-      unlistenResize?.();
-    };
-  }, []);
+  const { splashVisible, splashClosing } = useSplashLifecycle();
+  const transferClockNow = useTransferClock(hasActiveTransfer);
 
   useEffect(() => {
     void Promise.all([
@@ -584,15 +426,11 @@ export function App() {
         setProfiles(profilesResult);
         setFolders(foldersResult);
         setCommandSnippets(commandsResult);
-        setLayoutSettings(layoutResult);
-        const effectiveLayout = resolveStartupLayout(layoutResult);
-        setSidebarCollapsed(!effectiveLayout.leftSidebarOpen);
-        setAssistantOpen(effectiveLayout.rightSidebarOpen);
-        setBottomPanelOpen(effectiveLayout.bottomPanelOpen);
+        applyLoadedLayout(layoutResult);
         setActiveProfileId(null);
       }
     );
-  }, []);
+  }, [applyLoadedLayout]);
 
   useEffect(() => {
     activeProfileIdRef.current = activeProfileId;
@@ -603,59 +441,45 @@ export function App() {
   }, [profiles]);
 
   useEffect(() => {
-    if (!isDesktopRuntime) {
-      return;
+    shellProfileIdsRef.current = shellProfileIds;
+  }, [shellProfileIds]);
+
+  const handleSessionStateChanged = useCallback((sessionId: string, state: SessionInfo["state"]) => {
+    setSessions((current) =>
+      current.map((session) => session.id === sessionId ? { ...session, state } : session)
+    );
+    if (
+      sessionId === activeProfileIdRef.current
+      && !isConnectedState(state)
+      && state !== "Connecting"
+      && state !== "Reconnecting"
+    ) {
+      setLatencyMs(null);
+      setLatencyStatus("\u65ad\u5f00");
     }
+    appendSessionStateNotice(sessionId, state);
+  }, [appendSessionStateNotice]);
 
-    let unlisten: (() => void) | undefined;
-    void listen<SessionEventPayload>("session:event", (event) => {
-      const payload = event.payload;
+  const handleTerminalOutput = useCallback((sessionId: string, data: string) => {
+    appendTerminalOutput(data, sessionId);
+  }, [appendTerminalOutput]);
 
-      if ("StateChanged" in payload) {
-        const { session_id, state } = payload.StateChanged;
-        setSessions((current) =>
-          current.map((session) => session.id === session_id ? { ...session, state } : session)
-        );
-        if (
-          session_id === activeProfileIdRef.current
-          && !isConnectedState(state)
-          && state !== "Connecting"
-          && state !== "Reconnecting"
-        ) {
-          setLatencyMs(null);
-          setLatencyStatus("断开");
-        }
-        appendSessionStateNotice(session_id, state);
-        return;
-      }
-
-      if ("TerminalOutput" in payload) {
-        const { session_id, data } = payload.TerminalOutput;
-        appendTerminalOutput(data, session_id);
-        return;
-      }
-
-      if ("SftpProgress" in payload) {
-        const progress = payload.SftpProgress;
-        upsertTransfer(progress);
-      }
-    }).then((dispose) => {
-      unlisten = dispose;
-    });
-
-    return () => {
-      unlisten?.();
-    };
-  }, [appendSessionStateNotice, appendTerminalOutput, upsertTransfer]);
-
+  useSessionEvents({
+    onStateChanged: handleSessionStateChanged,
+    onTerminalOutput: handleTerminalOutput,
+    onSftpProgress: upsertTransfer
+  });
+  const activeShellProfileId = activeProfileId
+    ? shellProfileIds[activeProfileId] ?? activeProfileId
+    : null;
   const activeProfile = useMemo(
-    () => profiles.find((profile) => profile.id === activeProfileId),
-    [activeProfileId, profiles]
+    () => profiles.find((profile) => profile.id === activeShellProfileId),
+    [activeShellProfileId, profiles]
   );
 
   const activeSession = useMemo(
-    () => sessions.find((session) => session.id === activeProfile?.id && isConnectedState(session.state)),
-    [activeProfile?.id, sessions]
+    () => sessions.find((session) => session.id === activeProfileId && isConnectedState(session.state)),
+    [activeProfileId, sessions]
   );
 
   const selectedRemoteEntry = useMemo(
@@ -689,6 +513,13 @@ export function App() {
       ? profiles.find((profile) => profile.id === contextMenu.profileId) ?? null
       : null,
     [contextMenu, profiles]
+  );
+  const contextTabShellId = contextMenu?.kind === "tab" ? contextMenu.shellId ?? null : null;
+  const contextProfileShellIds = useMemo(
+    () => contextProfile
+      ? openProfileIds.filter((shellId) => (shellProfileIds[shellId] ?? shellId) === contextProfile.id)
+      : [],
+    [contextProfile, openProfileIds, shellProfileIds]
   );
 
   const normalizedSessionSearch = sessionSearchQuery.trim().toLowerCase();
@@ -747,20 +578,56 @@ export function App() {
     saveCollapsedSessionFolders(collapsedSessionFolderIds);
   }, [collapsedSessionFolderIds]);
 
-  const openProfiles = useMemo(
+  const openShellTabs = useMemo(
     () => openProfileIds
-      .map((id) => profiles.find((profile) => profile.id === id))
-      .filter((profile): profile is SessionProfile => Boolean(profile)),
-    [openProfileIds, profiles]
+      .map((id) => {
+        const profileId = shellProfileIds[id] ?? id;
+        const profile = profiles.find((item) => item.id === profileId);
+        return profile ? { id, profile } : null;
+      })
+      .filter((tab): tab is { id: string; profile: SessionProfile } => Boolean(tab)),
+    [openProfileIds, profiles, shellProfileIds]
   );
 
   const activeProfileIndex = useMemo(
-    () => openProfiles.findIndex((profile) => profile.id === activeProfile?.id),
-    [activeProfile?.id, openProfiles]
+    () => openShellTabs.findIndex((tab) => tab.id === activeProfileId),
+    [activeProfileId, openShellTabs]
   );
 
   const connectedSessions = useMemo(
     () => sessions.filter((session) => isConnectedState(session.state)),
+    [sessions]
+  );
+  const connectedSessionIds = useMemo(
+    () => new Set(connectedSessions.map((session) => session.id)),
+    [connectedSessions]
+  );
+  const pendingSessionIds = useMemo(
+    () => new Set(
+      sessions
+        .filter((session) => session.state === "Connecting" || session.state === "Reconnecting")
+        .map((session) => session.id)
+    ),
+    [sessions]
+  );
+  const trackedSessionIds = useMemo(
+    () => new Set(sessions.map((session) => session.id)),
+    [sessions]
+  );
+  const connectedProfileIds = useMemo(
+    () => new Set(connectedSessions.map((session) => session.profile_id)),
+    [connectedSessions]
+  );
+  const pendingProfileIds = useMemo(
+    () => new Set(
+      sessions
+        .filter((session) => session.state === "Connecting" || session.state === "Reconnecting")
+        .map((session) => session.profile_id)
+    ),
+    [sessions]
+  );
+  const trackedProfileIds = useMemo(
+    () => new Set(sessions.map((session) => session.profile_id)),
     [sessions]
   );
 
@@ -771,11 +638,12 @@ export function App() {
       return;
     }
 
-    activeProfileIdRef.current = activeProfile.id;
-    const cached = terminalCacheRef.current[activeProfile.id] ?? buildSelectedProfileSeed(activeProfile);
-    replaceTerminalOutput(cached, activeProfile.id);
+    const shellId = activeProfileId ?? activeProfile.id;
+    activeProfileIdRef.current = shellId;
+    const cached = terminalCacheRef.current[shellId] ?? buildSelectedProfileSeed(activeProfile);
+    replaceTerminalOutput(cached, shellId);
     window.setTimeout(() => terminalRef.current?.focus(), 0);
-  }, [activeProfile, replaceTerminalOutput]);
+  }, [activeProfile, activeProfileId, replaceTerminalOutput]);
 
   useEffect(() => {
     systemSyncInFlightRef.current = false;
@@ -788,8 +656,8 @@ export function App() {
       setSelectedRemotePath(null);
       setSftpStatus("等待连接");
       previousSystemSnapshotRef.current = null;
-      if (activeProfile?.id) {
-        latencyTimeoutCountRef.current[activeProfile.id] = 0;
+      if (activeProfileId) {
+        latencyTimeoutCountRef.current[activeProfileId] = 0;
       }
       return;
     }
@@ -818,9 +686,9 @@ export function App() {
     const target = activeSession ? resolveLatencyTarget(activeProfile) : null;
     if (!target || !activeSession) {
       setLatencyMs(null);
-      setLatencyStatus(activeProfile?.id && terminalDisconnectNoticeRef.current[activeProfile.id] ? "断开" : "待连接");
-      if (activeProfile?.id) {
-        latencyTimeoutCountRef.current[activeProfile.id] = 0;
+      setLatencyStatus(activeProfileId && terminalDisconnectNoticeRef.current[activeProfileId] ? "断开" : "待连接");
+      if (activeProfileId) {
+        latencyTimeoutCountRef.current[activeProfileId] = 0;
       }
       return;
     }
@@ -933,48 +801,58 @@ export function App() {
     activeProfile?.host,
     activeProfile?.port,
     activeProfile?.use_terminal_latency_probe,
+    activeProfileId,
     activeSession?.id,
     activeSession?.state,
     markSessionDisconnected
   ]);
 
-  const flash = useCallback((message: string) => {
-    setNotice(message);
-    window.setTimeout(() => setNotice(null), 1800);
-  }, []);
+  const openShellProfile = useCallback((profileId: string, forceNew = false) => {
+    const existingShellId = forceNew
+      ? undefined
+      : openProfileIds.find((shellId) => (shellProfileIds[shellId] ?? shellId) === profileId);
+    const shellId = existingShellId ?? (
+      !forceNew && !openProfileIds.includes(profileId) ? profileId : crypto.randomUUID()
+    );
+    setShellProfileIds((current) => current[shellId] === profileId
+      ? current
+      : { ...current, [shellId]: profileId });
+    setOpenProfileIds((current) => current.includes(shellId) ? current : [...current, shellId]);
+    setActiveProfileId(shellId);
+    return shellId;
+  }, [openProfileIds, shellProfileIds]);
 
-  const openShellProfile = useCallback((profileId: string) => {
-    setOpenProfileIds((current) => current.includes(profileId) ? current : [...current, profileId]);
-    setActiveProfileId(profileId);
-  }, []);
-
-  const closeShellProfile = useCallback(async (profileId: string) => {
+  const closeShellProfile = useCallback(async (shellId: string) => {
     setOpenProfileIds((current) => {
-      const next = current.filter((id) => id !== profileId);
-      if (activeProfileId === profileId) {
+      const next = current.filter((id) => id !== shellId);
+      if (activeProfileId === shellId) {
         setActiveProfileId(next.at(-1) ?? null);
       }
       return next;
     });
-    setSessions((current) => current.filter((session) => session.id !== profileId));
-    terminalCacheRef.current[profileId] = "";
+    setShellProfileIds((current) => {
+      const next = { ...current };
+      delete next[shellId];
+      return next;
+    });
+    setSessions((current) => current.filter((session) => session.id !== shellId));
+    clearTerminalCache(shellId);
     try {
-      await disconnectProfile(profileId);
+      await disconnectProfile(shellId);
     } catch {
       // Closing a tab should still succeed if the session was already gone.
     }
-  }, [activeProfileId]);
+  }, [activeProfileId, clearTerminalCache]);
 
   const closeAllShells = useCallback(async () => {
     const ids = [...openProfileIds];
     setOpenProfileIds([]);
+    setShellProfileIds({});
     setActiveProfileId(null);
     setSessions((current) => current.filter((session) => !ids.includes(session.id)));
-    ids.forEach((id) => {
-      terminalCacheRef.current[id] = "";
-    });
+    ids.forEach(clearTerminalCache);
     await Promise.all(ids.map((id) => disconnectProfile(id).catch(() => undefined)));
-  }, [openProfileIds]);
+  }, [clearTerminalCache, openProfileIds]);
 
   const moveProfileToFolder = useCallback(async (profileId: string, folderName: string | null) => {
     const profile = profiles.find((item) => item.id === profileId);
@@ -1202,38 +1080,6 @@ export function App() {
     window.addEventListener("pointercancel", onPointerCancel, true);
   }, [folders, moveOpenTabToEnd, persistProfileOrder, reorderOpenTab]);
 
-  const saveLayoutPreference = useCallback((patch: Partial<LayoutSettings>) => {
-    setLayoutSettings((current) => {
-      const next = { ...current, ...patch };
-      void saveLayoutSettings(next).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        flash(`布局设置保存失败：${message}`);
-      });
-      return next;
-    });
-  }, [flash]);
-
-  const setLeftSidebarOpen = useCallback((open: boolean) => {
-    setSidebarCollapsed(!open);
-    if (layoutSettings.restore_last_layout) {
-      saveLayoutPreference({ last_left_sidebar_open: open });
-    }
-  }, [layoutSettings.restore_last_layout, saveLayoutPreference]);
-
-  const setRightSidebarOpen = useCallback((open: boolean) => {
-    setAssistantOpen(open);
-    if (layoutSettings.restore_last_layout) {
-      saveLayoutPreference({ last_right_sidebar_open: open });
-    }
-  }, [layoutSettings.restore_last_layout, saveLayoutPreference]);
-
-  const setBottomPanelPreferenceOpen = useCallback((open: boolean) => {
-    setBottomPanelOpen(open);
-    if (layoutSettings.restore_last_layout) {
-      saveLayoutPreference({ last_bottom_panel_open: open });
-    }
-  }, [layoutSettings.restore_last_layout, saveLayoutPreference]);
-
   const refreshSystemSnapshot = useCallback(async () => {
     if (!activeSession) {
       setSystemStatus("未连接");
@@ -1248,6 +1094,14 @@ export function App() {
       const snapshot = await collectSystemSnapshot(activeSession.id);
       const previous = previousSystemSnapshotRef.current;
       setSystemSnapshot(snapshot);
+      const detectedOs = snapshot.host.os_name.trim();
+      if (detectedOs) {
+        setProfiles((current) => current.map((profile) =>
+          profile.id === activeSession.profile_id && profile.operating_system !== detectedOs
+            ? { ...profile, operating_system: detectedOs }
+            : profile
+        ));
+      }
       setSystemDerived(deriveSystemStats(previous, snapshot));
       previousSystemSnapshotRef.current = snapshot;
       systemSyncFailureCountRef.current = 0;
@@ -1323,14 +1177,21 @@ export function App() {
     };
   }, [activeSession?.id, refreshSystemSnapshot]);
 
-  const connectSelectedProfile = useCallback(async (profile: SessionProfile) => {
-    openShellProfile(profile.id);
-    setActiveProfileId(profile.id);
+  const connectSelectedProfile = useCallback(async (profile: SessionProfile, requestedShellId?: string) => {
+    const shellId = requestedShellId ?? openShellProfile(profile.id);
+    if (connectedSessionIds.has(shellId)) {
+      setActiveProfileId(shellId);
+      window.setTimeout(() => terminalRef.current?.focus(), 0);
+      return;
+    }
+    setShellProfileIds((current) => ({ ...current, [shellId]: profile.id }));
+    setOpenProfileIds((current) => current.includes(shellId) ? current : [...current, shellId]);
+    setActiveProfileId(shellId);
     setConnecting(true);
-    replaceTerminalOutput(buildConnectingTerminalSeed(profile), profile.id);
+    replaceTerminalOutput(buildConnectingTerminalSeed(profile), shellId);
 
     try {
-      const session = await connectProfile(profile.id);
+      const session = await connectProfile(profile.id, shellId);
       setSessions((current) => [
         session,
         ...current.filter((item) => item.id !== session.id)
@@ -1343,13 +1204,35 @@ export function App() {
       flash(`已连接 ${session.profile_name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setSessions((current) => current.filter((item) => item.id !== profile.id));
-      replaceTerminalOutput(buildFailedTerminalSeed(profile, message), profile.id);
+      setSessions((current) => current.filter((item) => item.id !== shellId));
+      replaceTerminalOutput(buildFailedTerminalSeed(profile, message), shellId);
       flash(`连接失败：${message}`);
     } finally {
       setConnecting(false);
     }
-  }, [flash, openShellProfile, replaceTerminalOutput]);
+  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput]);
+
+  const handleProfileDoubleClick = useCallback(async (profile: SessionProfile) => {
+    const decision = resolveProfileDoubleClickDecision({
+      profileId: profile.id,
+      openShellIds: openProfileIds,
+      shellProfileIds,
+      connectedSessionIds,
+      action: layoutSettings.connected_profile_double_click_action
+    });
+    if (decision.kind === "activate") {
+      setActiveProfileId(decision.shellId);
+      window.setTimeout(() => terminalRef.current?.focus(), 0);
+      return;
+    }
+    if (decision.kind === "create") {
+      const shellId = openShellProfile(profile.id, true);
+      await connectSelectedProfile(profile, shellId);
+      return;
+    }
+    const shellId = decision.shellId ?? openShellProfile(profile.id);
+    await connectSelectedProfile(profile, shellId);
+  }, [connectSelectedProfile, connectedSessionIds, layoutSettings.connected_profile_double_click_action, openProfileIds, openShellProfile, shellProfileIds]);
 
   const connect = useCallback(async () => {
     if (!activeProfile) {
@@ -1359,16 +1242,16 @@ export function App() {
       return;
     }
 
-    await connectSelectedProfile(activeProfile);
-  }, [activeProfile, connectSelectedProfile, flash, profiles]);
+    await connectSelectedProfile(activeProfile, activeProfileId ?? undefined);
+  }, [activeProfile, activeProfileId, connectSelectedProfile, flash, profiles]);
 
   const handleInput = useCallback(
     (data: string) => {
       setTerminalInputCount((count) => count + 1);
       const targetSessionId = activeSession?.id;
       if (!targetSessionId) {
-        if (activeProfile?.id) {
-          appendSessionStateNotice(activeProfile.id, "Disconnected");
+        if (activeProfileId) {
+          appendSessionStateNotice(activeProfileId, "Disconnected");
         }
         return;
       }
@@ -1384,7 +1267,7 @@ export function App() {
         });
       });
     },
-    [activeProfile?.id, activeSession?.id, appendSessionStateNotice]
+    [activeProfileId, activeSession?.id, appendSessionStateNotice]
   );
 
   const sendCommandDraft = useCallback(() => {
@@ -1395,8 +1278,8 @@ export function App() {
     }
     const targetSessionId = activeSession?.id;
     if (!targetSessionId) {
-      if (activeProfile?.id) {
-        appendSessionStateNotice(activeProfile.id, "Disconnected");
+      if (activeProfileId) {
+        appendSessionStateNotice(activeProfileId, "Disconnected");
       }
       flash("请先连接 SSH session");
       return;
@@ -1412,7 +1295,7 @@ export function App() {
       flash(`命令发送失败：${message}`);
     });
     setCommandDraft("");
-  }, [activeProfile?.id, activeSession?.id, appendSessionStateNotice, commandDraft, flash]);
+  }, [activeProfileId, activeSession?.id, appendSessionStateNotice, commandDraft, flash]);
 
   const resolveCommandTargetSessions = useCallback(() => {
     if (commandSendMode === "current") {
@@ -1837,12 +1720,13 @@ export function App() {
     });
   }, []);
 
-  const openTabContextMenu = useCallback((profile: SessionProfile, event: React.MouseEvent) => {
+  const openTabContextMenu = useCallback((profile: SessionProfile, shellId: string, event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
     setContextMenu({
       kind: "tab",
       profileId: profile.id,
+      shellId,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 248)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - 220))
     });
@@ -1929,23 +1813,37 @@ export function App() {
     }
     const previousProfiles = profiles;
     const previousOpenIds = openProfileIds;
+    const previousShellProfileIds = shellProfileIds;
+    const previousSessions = sessions;
+    const shellIds = Array.from(new Set([
+      ...openProfileIds.filter((shellId) => (shellProfileIds[shellId] ?? shellId) === profile.id),
+      ...sessions.filter((session) => session.profile_id === profile.id).map((session) => session.id)
+    ]));
     setProfiles((current) => current.filter((item) => item.id !== profile.id));
-    setOpenProfileIds((current) => current.filter((id) => id !== profile.id));
-    if (activeProfileId === profile.id) {
-      setActiveProfileId((current) => current === profile.id ? null : current);
+    setOpenProfileIds((current) => current.filter((id) => !shellIds.includes(id)));
+    setShellProfileIds((current) => Object.fromEntries(
+      Object.entries(current).filter(([shellId]) => !shellIds.includes(shellId))
+    ));
+    setSessions((current) => current.filter((session) => session.profile_id !== profile.id));
+    if (activeProfileId && shellIds.includes(activeProfileId)) {
+      setActiveProfileId(null);
     }
-    terminalCacheRef.current[profile.id] = "";
     try {
-      await disconnectProfile(profile.id).catch(() => undefined);
+      await Promise.all(shellIds.map((shellId) => disconnectProfile(shellId).catch(() => undefined)));
       const deleted = await deleteProfile(profile.id);
+      for (const shellId of shellIds) {
+        clearTerminalCache(shellId);
+      }
       flash(deleted ? `已删除服务器 ${profile.name}` : "服务器已不存在");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setProfiles(previousProfiles);
       setOpenProfileIds(previousOpenIds);
+      setShellProfileIds(previousShellProfileIds);
+      setSessions(previousSessions);
       flash(`删除服务器失败：${message}`);
     }
-  }, [activeProfileId, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles, requestDangerConfirmation]);
+  }, [activeProfileId, clearTerminalCache, flash, layoutSettings.skip_delete_confirmations, openProfileIds, profiles, requestDangerConfirmation, sessions, shellProfileIds]);
 
   const copyTerminalSelection = useCallback(async () => {
     const selected = terminalRef.current?.getSelection().trim();
@@ -2045,25 +1943,9 @@ export function App() {
         return;
       }
     }
-    setTransfers((current) => current.filter((item) => item.id !== transfer.id));
-    setTransferStats((current) => {
-      if (!current[transfer.id]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[transfer.id];
-      return next;
-    });
-    setCancellingTransfers((current) => {
-      if (!current[transfer.id]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[transfer.id];
-      return next;
-    });
+    removeTransferRecord(transfer.id);
     flash(deleteLocal ? "已移除记录并删除本地文件" : "已移除传输记录");
-  }, [deleteLocalFile, flash, layoutSettings.skip_delete_confirmations, requestDangerConfirmation]);
+  }, [deleteLocalFile, flash, layoutSettings.skip_delete_confirmations, removeTransferRecord, requestDangerConfirmation]);
 
   const retryTransfer = useCallback(async (transfer: SftpProgress) => {
     const session = sessions.find((item) => item.id === transfer.session_id && isConnectedState(item.state));
@@ -2238,43 +2120,17 @@ export function App() {
 
   const activatePreviousProfile = useCallback(() => {
     if (activeProfileIndex > 0) {
-      setActiveProfileId(openProfiles[activeProfileIndex - 1].id);
+      setActiveProfileId(openShellTabs[activeProfileIndex - 1].id);
     }
-  }, [activeProfileIndex, openProfiles]);
+  }, [activeProfileIndex, openShellTabs]);
 
   const activateNextProfile = useCallback(() => {
-    if (activeProfileIndex >= 0 && activeProfileIndex < openProfiles.length - 1) {
-      setActiveProfileId(openProfiles[activeProfileIndex + 1].id);
+    if (activeProfileIndex >= 0 && activeProfileIndex < openShellTabs.length - 1) {
+      setActiveProfileId(openShellTabs[activeProfileIndex + 1].id);
     }
-  }, [activeProfileIndex, openProfiles]);
+  }, [activeProfileIndex, openShellTabs]);
 
-  const minimizeWindow = useCallback(() => {
-    if (!isDesktopRuntime) {
-      flash("桌面打包版本可使用窗口控制");
-      return;
-    }
-    void getCurrentWindow().minimize();
-  }, [flash]);
-
-  const toggleMaximizeWindow = useCallback(() => {
-    if (!isDesktopRuntime) {
-      flash("桌面打包版本可使用窗口控制");
-      return;
-    }
-    const appWindow = getCurrentWindow();
-    void appWindow.toggleMaximize()
-      .then(() => appWindow.isMaximized())
-      .then(setWindowMaximized)
-      .catch(() => setWindowMaximized(false));
-  }, [flash]);
-
-  const closeWindow = useCallback(() => {
-    if (!isDesktopRuntime) {
-      flash("桌面打包版本可使用窗口控制");
-      return;
-    }
-    void getCurrentWindow().close();
-  }, [flash]);
+  const { windowMaximized, minimizeWindow, toggleMaximizeWindow, closeWindow } = useWindowControls(flash);
 
   const splashCenterImageSrc = layoutSettings.splash_center_image_data_url || splashCenterImage;
   const usingDefaultTerminalBackground = !layoutSettings.terminal_background_image_data_url;
@@ -2317,7 +2173,7 @@ export function App() {
               className="nav-control"
               title="下一个会话"
               onClick={activateNextProfile}
-              disabled={activeProfileIndex < 0 || activeProfileIndex >= openProfiles.length - 1}
+              disabled={activeProfileIndex < 0 || activeProfileIndex >= openShellTabs.length - 1}
             >
               <ChevronRight size={15} />
             </button>
@@ -2496,6 +2352,7 @@ export function App() {
                   </button>
                 </div>
                 {!isGroupCollapsed ? group.profiles.map((profile) => {
+                  const profileOs = resolveProfileOperatingSystem(profile);
                   const showBefore = dragIndicator?.kind === "profile"
                     && dragIndicator.targetId === profile.id
                     && dragIndicator.position === "before";
@@ -2525,7 +2382,7 @@ export function App() {
                           }
                           openShellProfile(profile.id);
                         }}
-                        onDoubleClick={() => void connectSelectedProfile(profile)}
+                        onDoubleClick={() => void handleProfileDoubleClick(profile)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") {
                             event.preventDefault();
@@ -2534,8 +2391,12 @@ export function App() {
                         }}
                         onContextMenu={(event) => openSessionContextMenu(profile, event)}
                       >
-                        <span className={`session-status-dot ${sessions.some((session) => session.id === profile.id) ? "online" : ""}`} />
-                        <span className="session-os-badge">{inferProfileOs(profile).label}</span>
+                        <span
+                          className={`session-status-dot ${connectedProfileIds.has(profile.id) ? "online" : pendingProfileIds.has(profile.id) ? "pending" : trackedProfileIds.has(profile.id) ? "offline" : ""}`}
+                        />
+                        <span className="session-os-badge" title={profileOs.label}>
+                          <OperatingSystemIcon symbolId={profileOs.symbolId} />
+                        </span>
                         <span className="session-main">
                           <strong>{profile.name}</strong>
                           <small>{profile.username}@{profile.host}</small>
@@ -2591,22 +2452,7 @@ export function App() {
           <AppSettingsWorkspace
             activePage={appSettingsPage}
             layout={layoutSettings}
-            onLayoutChange={(patch) => {
-              const nextPatch = patch.restore_last_layout
-                ? {
-                    ...patch,
-                    last_left_sidebar_open: !sidebarCollapsed,
-                    last_right_sidebar_open: assistantOpen,
-                    last_bottom_panel_open: bottomPanelOpen
-                  }
-                : patch;
-              const next = { ...layoutSettings, ...nextPatch };
-              setLayoutSettings(next);
-              void saveLayoutSettings(next).catch((error) => {
-                const message = error instanceof Error ? error.message : String(error);
-                flash(`保存设置失败：${message}`);
-              });
-            }}
+            onLayoutChange={updateLayoutSettings}
           />
         </main>
       ) : (
@@ -2639,32 +2485,32 @@ export function App() {
               }
             }}
           >
-            {openProfiles.map((profile) => {
+            {openShellTabs.map(({ id: shellId, profile }) => {
               const showBefore = dragIndicator?.kind === "tab"
-                && dragIndicator.targetId === profile.id
+                && dragIndicator.targetId === shellId
                 && dragIndicator.position === "before";
               const showAfter = dragIndicator?.kind === "tab"
-                && dragIndicator.targetId === profile.id
+                && dragIndicator.targetId === shellId
                 && dragIndicator.position === "after";
               return (
-                <div className="tab-wrap" key={profile.id}>
+                <div className="tab-wrap" key={shellId}>
                   {showBefore ? <div className="tab-drop-marker" /> : null}
                   <div
-                    className={`tab ${profile.id === activeProfile?.id ? "active" : ""}`}
-                    data-tab-profile-id={profile.id}
+                    className={`tab ${shellId === activeProfileId ? "active" : ""}`}
+                    data-tab-profile-id={shellId}
                     onClick={() => {
                       if (suppressNextClickRef.current) {
                         suppressNextClickRef.current = false;
                         return;
                       }
-                      setActiveProfileId(profile.id);
+                      setActiveProfileId(shellId);
                     }}
-                    onContextMenu={(event) => openTabContextMenu(profile, event)}
+                    onContextMenu={(event) => openTabContextMenu(profile, shellId, event)}
                     onPointerDown={(event) => {
-                      debugDrag("tab pointer down", { profileId: profile.id });
-                      beginPointerDrag(event, { kind: "tab", id: profile.id, label: profile.name });
+                      debugDrag("tab pointer down", { profileId: profile.id, shellId });
+                      beginPointerDrag(event, { kind: "tab", id: shellId, label: profile.name });
                     }}
-                    onMouseDown={() => debugDrag("tab mouse down", { profileId: profile.id })}
+                    onMouseDown={() => debugDrag("tab mouse down", { profileId: profile.id, shellId })}
                     onDragOver={(event) => {
                       if (draggedTabProfileIdRef.current || Array.from(event.dataTransfer.types).includes(TAB_DRAG_TYPE)) {
                         event.preventDefault();
@@ -2678,7 +2524,7 @@ export function App() {
                       const draggedId = getDraggedTabId(event);
                       draggedTabProfileIdRef.current = null;
                       if (draggedId) {
-                        reorderOpenTab(draggedId, profile.id);
+                        reorderOpenTab(draggedId, shellId);
                       }
                     }}
                     onDragEnd={() => {
@@ -2686,7 +2532,10 @@ export function App() {
                     }}
                   >
                     <span className="tab-main">
-                      <Circle size={9} fill={sessions.some((session) => session.id === profile.id) ? "var(--joy-success)" : "var(--joy-danger)"} />
+                      <Circle
+                        size={9}
+                        fill={connectedSessionIds.has(shellId) ? "var(--joy-success)" : pendingSessionIds.has(shellId) ? "var(--joy-warning)" : "var(--joy-danger)"}
+                      />
                       {profile.name}
                     </span>
                     <button
@@ -2697,7 +2546,7 @@ export function App() {
                       }}
                       onClick={(event) => {
                         event.stopPropagation();
-                        void closeShellProfile(profile.id);
+                        void closeShellProfile(shellId);
                       }}
                     >
                       <X size={12} />
@@ -2714,14 +2563,14 @@ export function App() {
               <ConnectionHome
                 profiles={profiles}
                 onAdd={openNewProfileDialog}
-                activeProfileId={activeProfileId}
+                activeProfileId={null}
                 onSelect={(profile) => openShellProfile(profile.id)}
                 onConnect={(profile) => void connectSelectedProfile(profile)}
               />
             ) : (
               <>
                 <JoyTerminal
-                  id={activeProfile?.id ?? "empty"}
+                  id={activeProfileId ?? "empty"}
                   initialOutput={terminalSeed}
                   onInput={handleInput}
                   onReady={(terminal) => {
@@ -2780,7 +2629,8 @@ export function App() {
         {activeProfile && bottomPanelOpen ? (
           <section
             ref={fileRegionRef}
-            className={`file-region ${sftpDropActive ? "drop-active" : ""}`}
+            className={`file-region ${sftpDropActive ? "drop-active" : ""} ${bottomPanelResize.isResizing ? "resizing" : ""}`}
+            style={{ "--bottom-panel-height": `${bottomPanelHeight}px` } as React.CSSProperties}
             onContextMenu={(event) => openAppContextMenu("file", event)}
             onDragOver={(event) => {
               event.preventDefault();
@@ -2794,6 +2644,18 @@ export function App() {
               setSftpDropActive(false);
             }}
           >
+          <div
+            className="file-region-resize-handle"
+            role="separator"
+            aria-label="调整文件面板高度"
+            aria-orientation="horizontal"
+            aria-valuemin={120}
+            aria-valuemax={390}
+            aria-valuenow={bottomPanelHeight}
+            tabIndex={0}
+            title="拖动调整文件面板高度"
+            {...bottomPanelResize.handleProps}
+          />
           <div className="file-tabs">
             <button
               className={`file-tab ${activeBottomView === "files" ? "active" : ""}`}
@@ -2853,7 +2715,7 @@ export function App() {
                   onClick={() => void refreshSftpListing(item.path)}
                   disabled={!activeSession || sftpBusy}
                 >
-                  <Folder size={15} fill="#f2c94c" />
+                  <FileKindIcon path={item.path} isDirectory />
                   <span>{item.label}</span>
                 </button>
               ))}
@@ -3043,7 +2905,7 @@ export function App() {
                 <button onClick={() => { void pasteToTerminal(); closeContextMenu(); }}>粘贴</button>
                 <button onClick={() => { selectAllTerminal(); closeContextMenu(); }}>全选</button>
                 <button onClick={() => { clearTerminal(); closeContextMenu(); }}>清屏</button>
-                <button onClick={() => { if (activeProfile) { void closeShellProfile(activeProfile.id); } closeContextMenu(); }} disabled={!activeProfile}>
+                <button onClick={() => { if (activeProfileId) { void closeShellProfile(activeProfileId); } closeContextMenu(); }} disabled={!activeProfileId}>
                   关闭当前 Shell
                 </button>
                 <button onClick={() => { void closeAllShells(); closeContextMenu(); }} disabled={openProfileIds.length === 0}>
@@ -3076,21 +2938,30 @@ export function App() {
               </>
             ) : contextMenu.kind === "tab" ? (
               <>
-                <button onClick={() => { if (contextTabProfile) { setActiveProfileId(contextTabProfile.id); } closeContextMenu(); }} disabled={!contextTabProfile}>
+                <button onClick={() => { if (contextTabShellId) { setActiveProfileId(contextTabShellId); } closeContextMenu(); }} disabled={!contextTabShellId}>
                   <ChevronRight size={14} /> 设为当前
                 </button>
-                <button onClick={() => { if (contextTabProfile) { void closeShellProfile(contextTabProfile.id); } closeContextMenu(); }} disabled={!contextTabProfile}>
+                <button onClick={() => { if (contextTabShellId) { void closeShellProfile(contextTabShellId); } closeContextMenu(); }} disabled={!contextTabShellId}>
                   <X size={14} /> 关闭 Shell
                 </button>
                 <button onClick={() => {
                   if (contextTabProfile) {
-                    void Promise.all(openProfileIds
-                      .filter((id) => id !== contextTabProfile.id)
-                      .map((id) => closeShellProfile(id)));
-                    setActiveProfileId(contextTabProfile.id);
+                    const shellId = openShellProfile(contextTabProfile.id, true);
+                    void connectSelectedProfile(contextTabProfile, shellId);
                   }
                   closeContextMenu();
-                }} disabled={!contextTabProfile || openProfileIds.length <= 1}>
+                }} disabled={!contextTabProfile}>
+                  <Plus size={14} /> 新建同服务器 Shell
+                </button>
+                <button onClick={() => {
+                  if (contextTabShellId) {
+                    void Promise.all(openProfileIds
+                      .filter((id) => id !== contextTabShellId)
+                      .map((id) => closeShellProfile(id)));
+                    setActiveProfileId(contextTabShellId);
+                  }
+                  closeContextMenu();
+                }} disabled={!contextTabShellId || openProfileIds.length <= 1}>
                   <X size={14} /> 关闭其他 Shell
                 </button>
                 <button onClick={() => { void closeAllShells(); closeContextMenu(); }} disabled={openProfileIds.length === 0}>
@@ -3105,7 +2976,19 @@ export function App() {
                 <button onClick={() => { if (contextProfile) { void connectSelectedProfile(contextProfile); } closeContextMenu(); }} disabled={!contextProfile}>
                   <Play size={14} /> 连接
                 </button>
-                <button onClick={() => { if (contextProfile) { void closeShellProfile(contextProfile.id); } closeContextMenu(); }} disabled={!contextProfile || !openProfileIds.includes(contextProfile.id)}>
+                <button onClick={() => {
+                  if (contextProfile) {
+                    const shellId = openShellProfile(contextProfile.id, true);
+                    void connectSelectedProfile(contextProfile, shellId);
+                  }
+                  closeContextMenu();
+                }} disabled={!contextProfile}>
+                  <Plus size={14} /> 新建 SSH 连接
+                </button>
+                <button onClick={() => {
+                  if (contextProfileShellIds[0]) { void closeShellProfile(contextProfileShellIds[0]); }
+                  closeContextMenu();
+                }} disabled={!contextProfile || contextProfileShellIds.length === 0}>
                   <X size={14} /> 关闭 Shell
                 </button>
                 <button onClick={() => { if (contextProfile) { openProfileSshSettings(contextProfile); } closeContextMenu(); }} disabled={!contextProfile}>
@@ -3241,422 +3124,6 @@ export function App() {
           }}
         />
       ) : null}
-    </div>
-  );
-}
-
-async function writeClipboardText(text: string) {
-  try {
-    await writeDesktopClipboardText(text);
-    return;
-  } catch {
-    // Fall back to the WebView clipboard path below.
-  }
-
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.setAttribute("readonly", "true");
-    textarea.style.position = "fixed";
-    textarea.style.left = "-9999px";
-    textarea.style.top = "0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    try {
-      if (!document.execCommand("copy")) {
-        throw new Error("execCommand copy failed");
-      }
-    } finally {
-      textarea.remove();
-    }
-  }
-}
-
-function joinRemotePath(directory: string, name: string) {
-  const cleanName = name.replaceAll("\\", "/").replace(/^\/+/, "");
-  if (!directory || directory === ".") {
-    return cleanName;
-  }
-  if (directory === "/") {
-    return `/${cleanName}`;
-  }
-  return `${directory.replace(/\/+$/, "")}/${cleanName}`;
-}
-
-function remoteBasename(path: string) {
-  return path.replaceAll("\\", "/").split("/").filter(Boolean).pop() || path;
-}
-
-function remoteParentDir(path: string) {
-  const normalized = path.replaceAll("\\", "/");
-  const lastSlash = normalized.lastIndexOf("/");
-  if (lastSlash <= 0) {
-    return normalized.startsWith("/") ? "/" : ".";
-  }
-  return normalized.slice(0, lastSlash);
-}
-
-function buildPathCrumbs(path: string) {
-  const normalized = path || "/";
-  if (normalized === "." || !normalized.startsWith("/")) {
-    return [{ label: normalized, path: normalized }];
-  }
-  const parts = normalized.split("/").filter(Boolean);
-  const crumbs = [{ label: "/", path: "/" }];
-  let current = "";
-  for (const part of parts) {
-    current += `/${part}`;
-    crumbs.push({ label: part, path: current });
-  }
-  return crumbs;
-}
-
-function trimCpuName(name: string) {
-  return name
-    .replace(/\(R\)|\(TM\)|CPU|Processor/gi, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 42) || "Unknown";
-}
-
-function buildSelectedProfileSeed(profile: SessionProfile) {
-  return [
-    `Selected ${profile.name} (${profile.username || "user"}@${profile.host || "host"}:${profile.port}).`,
-    "Click Connect to start a real SSH connection through the Tauri/Rust backend.",
-    isDesktopRuntime
-      ? "Desktop runtime detected: password will be checked by ssh2/libssh2."
-      : "Preview runtime detected: this page cannot open a real SSH socket.",
-    ""
-  ].join("\r\n");
-}
-
-function buildConnectingTerminalSeed(profile: SessionProfile) {
-  return [
-    `Connecting to ${profile.username || "user"}@${profile.host}:${profile.port}...`,
-    "Opening SSH session...",
-    ""
-  ].join("\r\n");
-}
-
-function buildFailedTerminalSeed(profile: SessionProfile, message: string) {
-  return [
-    `Connecting to ${profile.username || "user"}@${profile.host}:${profile.port}...`,
-    "Connection failed.",
-    "",
-    message,
-    ""
-  ].join("\r\n");
-}
-
-function trimTerminalCache(data: string) {
-  if (data.length <= TERMINAL_CACHE_LIMIT) {
-    return data;
-  }
-  return data.slice(data.length - TERMINAL_CACHE_LIMIT);
-}
-
-function loadCollapsedSessionFolders() {
-  try {
-    const raw = window.localStorage.getItem(COLLAPSED_SESSION_FOLDERS_STORAGE_KEY);
-    if (!raw) {
-      return new Set<string>();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set<string>();
-    }
-    return new Set(parsed.filter((item): item is string => typeof item === "string"));
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function saveCollapsedSessionFolders(folderIds: Set<string>) {
-  try {
-    window.localStorage.setItem(
-      COLLAPSED_SESSION_FOLDERS_STORAGE_KEY,
-      JSON.stringify(Array.from(folderIds))
-    );
-  } catch {
-    // Local storage can be unavailable in restricted preview contexts.
-  }
-}
-
-function Metric({
-  icon,
-  label,
-  value,
-  tone
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  tone?: "warning" | "success" | "danger";
-}) {
-  return (
-    <div className={`metric ${tone ?? ""}`}>
-      {icon}
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function SystemMonitorPanel({
-  activeProfile,
-  derived,
-  snapshot,
-  status
-}: {
-  activeProfile?: SessionProfile;
-  derived: SystemDerivedStats;
-  snapshot: SystemSnapshot | null;
-  status: string;
-}) {
-  const [networkDetailsOpen, setNetworkDetailsOpen] = useState(false);
-  const [cpuDetailsOpen, setCpuDetailsOpen] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const root = snapshot?.filesystems.find((fs) => fs.mount_point === "/") ?? snapshot?.filesystems[0];
-  const primaryInterface = derived.interfaceRates.find((iface) => iface.name !== "lo")
-    ?? derived.interfaceRates[0];
-  const interfaceRateByName = new Map(derived.interfaceRates.map((iface) => [iface.name, iface]));
-  const cpuCoreCount = snapshot ? snapshot.cpu_info.logical_cores || snapshot.cpu_cores.length : 0;
-  const cpuFrequency = snapshot ? formatCpuFrequency(snapshot.cpu_info.mhz) : "频率未知";
-
-  useEffect(() => {
-    if (copyState === "idle") {
-      return;
-    }
-    const timer = window.setTimeout(() => setCopyState("idle"), 1600);
-    return () => window.clearTimeout(timer);
-  }, [copyState]);
-
-  const copySystemInfo = useCallback(async () => {
-    try {
-      await writeClipboardText(buildSystemInfoClipboard(snapshot, derived, activeProfile, status));
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-  }, [activeProfile, derived, snapshot, status]);
-
-  return (
-    <div className="system-monitor">
-      <div className="system-monitor-meta">
-        <div>
-          <span className="system-kicker">同步状态</span>
-          <strong>{status}</strong>
-        </div>
-        <div>
-          <span className="system-kicker">IP</span>
-          <strong>{snapshot?.host.primary_ip ?? activeProfile?.host ?? "未连接"}</strong>
-        </div>
-        <button
-          className={`copy-button ${copyState}`}
-          type="button"
-          onClick={copySystemInfo}
-          title="复制系统信息"
-        >
-          <Copy size={13} />
-          <span>{copyState === "copied" ? "已复制" : copyState === "failed" ? "失败" : "复制"}</span>
-        </button>
-      </div>
-
-      <div className="system-monitor-grid">
-        <button
-          className={`system-monitor-card detail-card cpu-card ${cpuDetailsOpen ? "active" : ""}`}
-          type="button"
-          onClick={() => setCpuDetailsOpen((open) => !open)}
-        >
-          <div className="metric-title">
-            <Cpu size={14} />
-            <span>CPU</span>
-            <strong>{formatPercent(derived.cpuPercent)}</strong>
-          </div>
-          <UsageBar value={derived.cpuPercent ?? 0} tone="cpu" />
-          <small>
-            {snapshot
-              ? `${cpuCoreCount} 核 · ${cpuFrequency}`
-              : "等待连接"}
-          </small>
-        </button>
-
-        <div className="system-monitor-card">
-          <div className="metric-title">
-            <MemoryStick size={14} />
-            <span>内存</span>
-            <strong>{formatUsagePercent(snapshot?.memory)}</strong>
-          </div>
-          <UsageBar value={usagePercent(snapshot?.memory)} tone="memory" />
-          <small>
-            {snapshot
-              ? `${formatBytes(snapshot.memory.used_bytes)}/${formatBytes(snapshot.memory.total_bytes)} · ${formatMemoryFrequency(snapshot.memory_info.frequency_mhz)}`
-              : "等待连接"}
-          </small>
-        </div>
-
-        <div className="system-monitor-card">
-          <div className="metric-title">
-            <HardDrive size={14} />
-            <span>交换</span>
-            <strong>{formatUsagePercent(snapshot?.swap)}</strong>
-          </div>
-          <UsageBar value={usagePercent(snapshot?.swap)} tone="swap" />
-          <small>{snapshot ? `${formatBytes(snapshot.swap.used_bytes)}/${formatBytes(snapshot.swap.total_bytes)}` : "等待连接"}</small>
-        </div>
-
-        <button
-          className={`system-monitor-card detail-card network-card ${networkDetailsOpen ? "active" : ""}`}
-          type="button"
-          onClick={() => setNetworkDetailsOpen((open) => !open)}
-        >
-          <div className="metric-title">
-            <Network size={14} />
-            <span>{primaryInterface?.name ?? "网络"}</span>
-            <strong>{formatRate(derived.rxRate)}</strong>
-          </div>
-          <div className="network-rate-row">
-            <span>↑ {formatRate(derived.txRate)}</span>
-            <span>↓ {formatRate(derived.rxRate)}</span>
-          </div>
-          <small>
-            {snapshot?.network
-              .filter((iface) => iface.name !== "lo")
-              .flatMap((iface) => iface.ipv4_addresses)
-                .join(", ") || "无活动网卡"}
-          </small>
-        </button>
-      </div>
-
-      {cpuDetailsOpen ? (
-        <div className="hardware-detail-panel">
-          {snapshot ? (
-            <>
-              <div className="hardware-detail-row wide">
-                <span>型号</span>
-                <strong>{snapshot.cpu_info.model_name || "Unknown CPU"}</strong>
-              </div>
-              <div className="hardware-detail-row wide">
-                <span>设备</span>
-                <strong>{snapshot.host.device_model || "--"}</strong>
-              </div>
-              <div className="hardware-detail-row">
-                <span>逻辑核心</span>
-                <strong>{cpuCoreCount || "--"}</strong>
-              </div>
-              <div className="hardware-detail-row">
-                <span>物理核心</span>
-                <strong>{snapshot.cpu_info.physical_cores ?? "--"}</strong>
-              </div>
-              <div className="hardware-detail-row">
-                <span>ARM Part</span>
-                <strong>{snapshot.cpu_info.raw_part ?? "--"}</strong>
-              </div>
-              <div className="hardware-detail-row">
-                <span>当前频率</span>
-                <strong>{cpuFrequency}</strong>
-              </div>
-              <div className="hardware-detail-row">
-                <span>架构</span>
-                <strong>{snapshot.host.architecture || "--"}</strong>
-              </div>
-              <div className="hardware-detail-row wide">
-                <span>内核</span>
-                <strong>{[snapshot.host.kernel_name, snapshot.host.kernel_release].filter(Boolean).join(" ") || "--"}</strong>
-              </div>
-            </>
-          ) : (
-            <div className="network-detail-empty">等待 CPU 信息同步</div>
-          )}
-        </div>
-      ) : null}
-
-      {networkDetailsOpen ? (
-        <div className="network-detail-panel">
-          {snapshot?.network.length ? snapshot.network.map((iface) => {
-            const rate = interfaceRateByName.get(iface.name);
-            return (
-              <div className="network-detail-row" key={iface.name}>
-                <div>
-                  <strong>{iface.name}</strong>
-                  <small>{iface.ipv4_addresses.join(", ") || "无 IPv4 地址"}</small>
-                </div>
-                <span>↓ {formatRate(rate?.rxRate ?? 0)}</span>
-                <span>↑ {formatRate(rate?.txRate ?? 0)}</span>
-                <span>RX {formatBytes(iface.rx_bytes)}</span>
-                <span>TX {formatBytes(iface.tx_bytes)}</span>
-                <span>包 {iface.rx_packets}/{iface.tx_packets}</span>
-                <span>错误 {iface.rx_errors}/{iface.tx_errors}</span>
-              </div>
-            );
-          }) : (
-            <div className="network-detail-empty">等待网络信息同步</div>
-          )}
-        </div>
-      ) : null}
-
-      <div className="system-monitor-footer">
-        <span>运行 {formatUptime(snapshot?.uptime_seconds ?? 0)}</span>
-        <span>负载 {formatLoad(snapshot)}</span>
-        <span>进程 {snapshot ? `${snapshot.processes.running}/${snapshot.processes.total}` : "--"}</span>
-        <span>磁盘 {root ? `${root.mount_point}: ${root.used_percent.toFixed(0)}%` : "--"}</span>
-        <span>{snapshot?.host.os_name || "Linux/Unix 监控待同步"}</span>
-      </div>
-    </div>
-  );
-}
-
-function UsageBar({ value, tone }: { value: number; tone: "cpu" | "memory" | "swap" }) {
-  return (
-    <div className={`usage-bar ${tone}`} aria-hidden="true">
-      <span style={{ width: `${clampPercent(value)}%` }} />
-    </div>
-  );
-}
-
-function SystemInfoDialog({
-  activeProfile,
-  derived,
-  snapshot,
-  status,
-  onClose,
-  onRefresh
-}: {
-  activeProfile?: SessionProfile;
-  derived: SystemDerivedStats;
-  snapshot: SystemSnapshot | null;
-  status: string;
-  onClose: () => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="system-dialog" role="dialog" aria-modal="true" aria-label="系统信息">
-        <header className="dialog-titlebar">
-          <div>
-            <Cpu size={16} />
-            <strong>系统信息</strong>
-          </div>
-          <div className="dialog-title-actions">
-            <button className="dialog-close" onClick={onRefresh} title="刷新">
-              <RefreshCw size={15} />
-            </button>
-            <button className="dialog-close" onClick={onClose} title="关闭">
-              <X size={16} />
-            </button>
-          </div>
-        </header>
-        <SystemMonitorPanel
-          activeProfile={activeProfile}
-          derived={derived}
-          snapshot={snapshot}
-          status={status}
-        />
-      </section>
     </div>
   );
 }

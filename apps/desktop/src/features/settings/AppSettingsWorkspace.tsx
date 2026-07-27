@@ -108,6 +108,24 @@ export function AppSettingsWorkspace({
                 </label>
               </section>
               <section>
+                <strong>会话</strong>
+                <label className="settings-select-row">
+                  <span>
+                    <b>已连接服务器双击</b>
+                    <small>选择打开已有 Shell 或创建独立连接。</small>
+                  </span>
+                  <select
+                    value={layout.connected_profile_double_click_action}
+                    onChange={(event) => onLayoutChange({
+                      connected_profile_double_click_action: event.target.value as LayoutSettings["connected_profile_double_click_action"]
+                    })}
+                  >
+                    <option value="open_earliest">打开最早 Shell</option>
+                    <option value="new_session">新建 SSH 连接</option>
+                  </select>
+                </label>
+              </section>
+              <section>
                 <strong>危险操作</strong>
                 <label className="settings-toggle-row">
                   <span>
@@ -134,7 +152,10 @@ export function AppSettingsWorkspace({
                       className={`appearance-swatch ${layout.chrome_gradient_preset === preset.id ? "active" : ""}`}
                       onClick={() => onLayoutChange({ chrome_gradient_preset: preset.id })}
                     >
-                      <span style={{ background: `linear-gradient(135deg, ${preset.stops[0]}, ${preset.stops[1]} 56%, ${preset.stops[2]})` }} />
+                      <span
+                        className="appearance-swatch-preview"
+                        style={{ background: `linear-gradient(135deg, ${preset.stops[0]}, ${preset.stops[1]} 56%, ${preset.stops[2]})` }}
+                      />
                       <span className="appearance-swatch-copy">
                         <strong>{preset.name}</strong>
                         <small>{preset.description}</small>

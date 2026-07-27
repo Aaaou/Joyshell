@@ -24,7 +24,11 @@ The local store persists SSH session profiles and session folders for the deskto
 - The schema currently includes:
   - `session_profiles`
   - `session_folders`
+  - `secret_values`
+  - `command_snippets`
+  - `layout_settings`
 - `SessionProfile.auth_method`, `tags`, and host key policy are serialized as structured JSON fields where needed.
+- `SessionProfile.operating_system` stores the OS name returned by the remote system probe. It is nullable for profiles that have never completed a probe, and existing databases receive the column through `ensure_table_column` without being cleared.
 - The old default test server injection was removed from `AppState`.
 - SSH passwords are encrypted before being stored in SQLite:
   - encryption: AES-256-GCM
@@ -71,18 +75,19 @@ The schema should stay portable so the project can later add an optional sync/in
 
 ## Verification
 
-- `pnpm --filter @joyshell/desktop typecheck`
-- `pnpm --filter @joyshell/desktop build`
-- `cargo check`
-- Chrome headless preview screenshot:
-  - `target/joyshell-sqlite-home-preview-final.png`
+- `pnpm build`
+- `cargo test --workspace`
+- Desktop smoke test: create folders/profiles, restart the app, reconnect with the encrypted saved password, then verify layout and command snippets are restored.
+
+## Uninstall Retention
+
+- NSIS upgrades default to an in-place overwrite and retain the SQLite database and all application data.
+- A normal uninstall shows a `清除用户数据` checkbox on the confirmation page.
+- The checkbox is off by default. Uninstalling without selecting it keeps profiles, encrypted passwords, commands, and layout settings for a later reinstall.
+- Update-mode uninstall stages never remove user data, even if the uninstaller is called internally by the installer.
 
 ## Follow-up
 
-- Upgrade encrypted SQLite password storage to OS keychain storage:
-  - Windows Credential Manager
-  - macOS Keychain
-  - Linux Secret Service
-- Add folder rename/delete and profile move actions.
-- Add a migration version table before the schema grows further.
-- Persist UI state such as last selected profile only after the basic profile model stabilizes.
+- Upgrade encrypted password storage to Windows Credential Manager, macOS Keychain and Linux Secret Service while keeping references in SQLite.
+- Add an explicit schema version/migration table; current migrations use idempotent `CREATE TABLE` and `ensure_*_column` helpers.
+- Extend the same explicit data-retention choice to MSI, macOS and Linux packages.

@@ -24,7 +24,10 @@ pub type SessionId = Uuid;
 
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
 const SSH_OPERATION_TIMEOUT_MS: u32 = 15_000;
-const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 20;
+const SSH_HEALTH_INTERVAL_SECS: u64 = 5;
+const SSH_HEALTH_TIMEOUT_MS: u64 = 3_000;
+const SSH_HEALTH_CACHE_MS: u64 = 2_000;
+const LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED: i32 = -22;
 const SYSTEM_SYNC_TIMEOUT_MS: u32 = 8_000;
 const SYSTEM_SYNC_MAX_ATTEMPTS: u32 = 2;
 const SFTP_TRANSFER_TIMEOUT_MS: u32 = 60_000;
@@ -64,6 +67,8 @@ pub struct SessionProfile {
     pub latency_probe_port: Option<u16>,
     #[serde(default)]
     pub use_terminal_latency_probe: bool,
+    #[serde(default)]
+    pub operating_system: Option<String>,
     pub username: String,
     pub auth_method: AuthMethod,
     pub host_key_policy: HostKeyPolicy,
@@ -85,6 +90,7 @@ pub enum ConnectionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
+    pub profile_id: SessionId,
     pub profile_name: String,
     pub host: String,
     pub port: u16,
@@ -242,6 +248,8 @@ struct SessionRuntime {
     ssh: Option<SshRuntime>,
     runtime_token: Uuid,
     last_transient_io: Option<String>,
+    last_health_rtt_ms: Option<f64>,
+    last_health_at: Option<Instant>,
 }
 
 struct SshRuntime {
@@ -252,6 +260,17 @@ struct SshRuntime {
 enum SshControl {
     Terminal(Vec<u8>),
     MeasureLatency(oneshot::Sender<Result<Option<f64>, String>>),
+}
+
+struct PendingHealthProbe {
+    started_at: Instant,
+    responses: Vec<oneshot::Sender<Result<Option<f64>, String>>>,
+}
+
+enum HealthProbePoll {
+    Pending,
+    Alive(f64),
+    Failed(String),
 }
 
 enum SideTransferError {
@@ -311,9 +330,21 @@ impl SessionManager {
         profile: SessionProfile,
         password: String,
     ) -> Result<SshSessionHandle, SessionError> {
+        let session_id = profile.id;
+        self.connect_ssh_password_for_session(profile, password, session_id)
+            .await
+    }
+
+    pub async fn connect_ssh_password_for_session(
+        &self,
+        profile: SessionProfile,
+        password: String,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
         let now = Utc::now();
         let connecting_info = SessionInfo {
-            id: profile.id,
+            id: session_id,
+            profile_id: profile.id,
             profile_name: profile.name.clone(),
             host: profile.host.clone(),
             port: profile.port,
@@ -324,7 +355,7 @@ impl SessionManager {
         };
 
         self.sessions.write().insert(
-            profile.id,
+            session_id,
             SessionRuntime {
                 info: connecting_info,
                 profile: profile.clone(),
@@ -333,21 +364,22 @@ impl SessionManager {
                 ssh: None,
                 runtime_token: Uuid::new_v4(),
                 last_transient_io: None,
+                last_health_rtt_ms: None,
+                last_health_at: None,
             },
         );
         let _ = self.events.send(SessionEvent::StateChanged {
-            session_id: profile.id,
+            session_id,
             state: ConnectionState::Connecting,
         });
         self.push_output(
-            profile.id,
+            session_id,
             format!(
                 "Connecting to {}@{}:{}...\r\n",
                 profile.username, profile.host, profile.port
             ),
         );
 
-        let session_id = profile.id;
         let profile_for_connect = profile.clone();
         let password_for_connect = password.clone();
         let connect_result = tokio::task::spawn_blocking(move || {
@@ -477,15 +509,19 @@ impl SessionManager {
         session_id: SessionId,
     ) -> Result<Option<f64>, SessionError> {
         let receiver = {
-            let mut sessions = self.sessions.write();
+            let sessions = self.sessions.read();
             let runtime = sessions
-                .get_mut(&session_id)
+                .get(&session_id)
                 .ok_or(SessionError::NotFound(session_id))?;
-            runtime.info.last_seen_at = Utc::now();
             if runtime.info.state != ConnectionState::Connected {
                 return Err(SessionError::NotConnected(session_id));
             }
-            let ssh = runtime.ssh.as_mut().ok_or_else(|| {
+            if runtime.last_health_at.is_some_and(|checked_at| {
+                checked_at.elapsed() <= Duration::from_millis(SSH_HEALTH_CACHE_MS)
+            }) {
+                return Ok(runtime.last_health_rtt_ms);
+            }
+            let ssh = runtime.ssh.as_ref().ok_or_else(|| {
                 SessionError::ConnectionFailed("terminal channel is not available".to_string())
             })?;
             let (sender, receiver) = oneshot::channel();
@@ -719,10 +755,14 @@ impl SessionManager {
             .get(&session_id)
             .ok_or(SessionError::NotFound(session_id))?;
         Ok(format!(
-            "session={session_id} state={:?} has_ssh={} tail_chunks={} last_transient_io={}",
+            "session={session_id} state={:?} has_ssh={} tail_chunks={} health_rtt_ms={} last_transient_io={}",
             runtime.info.state,
             runtime.ssh.is_some(),
             runtime.output_tail.len(),
+            runtime
+                .last_health_rtt_ms
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "none".to_string()),
             runtime.last_transient_io.as_deref().unwrap_or("none")
         ))
     }
@@ -822,7 +862,6 @@ impl SessionManager {
                     reason: reason.clone(),
                 },
             });
-            self.push_output_for_runtime(session_id, runtime_token, format!("\r\n[{reason}]\r\n"));
         }
     }
 
@@ -830,7 +869,7 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         runtime_token: Uuid,
-        reason: String,
+        _reason: String,
     ) {
         let should_emit = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
             if runtime.runtime_token != runtime_token {
@@ -850,7 +889,6 @@ impl SessionManager {
                 session_id,
                 state: ConnectionState::Disconnected,
             });
-            self.push_output_for_runtime(session_id, runtime_token, format!("\r\n[{reason}]\r\n"));
         }
     }
 
@@ -870,6 +908,22 @@ impl SessionManager {
             }
         }
     }
+
+    fn record_health_success_for_runtime(
+        &self,
+        session_id: SessionId,
+        runtime_token: Uuid,
+        elapsed_ms: f64,
+    ) {
+        if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+            if runtime.runtime_token == runtime_token {
+                runtime.last_health_rtt_ms = Some(elapsed_ms);
+                runtime.last_health_at = Some(Instant::now());
+                runtime.info.last_seen_at = Utc::now();
+                runtime.last_transient_io = None;
+            }
+        }
+    }
 }
 
 fn run_ssh_session_loop(
@@ -885,6 +939,8 @@ fn run_ssh_session_loop(
     let mut pending_write = Vec::new();
     let mut pending_offset = 0;
     let mut socket_waiter = SocketWaiter::new(wait_socket);
+    let mut health_probe: Option<PendingHealthProbe> = None;
+    let mut next_health_probe_at = Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
 
     loop {
         loop {
@@ -893,9 +949,14 @@ fn run_ssh_session_loop(
                     pending_write.extend_from_slice(&data);
                 }
                 Ok(SshControl::MeasureLatency(response)) => {
-                    let result =
-                        measure_channel_roundtrip_ms(&session, &mut channel, &mut socket_waiter);
-                    let _ = response.send(result);
+                    if let Some(probe) = health_probe.as_mut() {
+                        probe.responses.push(response);
+                    } else {
+                        health_probe = Some(PendingHealthProbe {
+                            started_at: Instant::now(),
+                            responses: vec![response],
+                        });
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -976,8 +1037,41 @@ fn run_ssh_session_loop(
             return;
         }
 
+        if health_probe.is_none() && Instant::now() >= next_health_probe_at {
+            health_probe = Some(PendingHealthProbe {
+                started_at: Instant::now(),
+                responses: Vec::new(),
+            });
+        }
+
+        if let Some(probe) = health_probe.as_ref() {
+            match poll_channel_health(&mut channel, probe.started_at) {
+                HealthProbePoll::Pending => {}
+                HealthProbePoll::Alive(elapsed_ms) => {
+                    let completed = health_probe.take().expect("health probe exists");
+                    for response in completed.responses {
+                        let _ = response.send(Ok(Some(elapsed_ms)));
+                    }
+                    manager.record_health_success_for_runtime(
+                        session_id,
+                        runtime_token,
+                        elapsed_ms,
+                    );
+                    next_health_probe_at =
+                        Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
+                }
+                HealthProbePoll::Failed(reason) => {
+                    let failed = health_probe.take().expect("health probe exists");
+                    for response in failed.responses {
+                        let _ = response.send(Err(reason.clone()));
+                    }
+                    manager.fail_session_for_runtime(session_id, runtime_token, reason);
+                    return;
+                }
+            }
+        }
+
         socket_waiter.wait(&session, Duration::from_millis(10));
-        let _ = session.keepalive_send();
     }
 }
 
@@ -1030,26 +1124,26 @@ fn drain_channel_output(
     true
 }
 
-fn measure_channel_roundtrip_ms(
-    session: &ssh2::Session,
-    channel: &mut ssh2::Channel,
-    socket_waiter: &mut SocketWaiter,
-) -> Result<Option<f64>, String> {
-    let started = Instant::now();
-    let timeout = Duration::from_millis(3000);
-
-    loop {
-        match channel.request_pty_size(120, 32, None, None) {
-            Ok(()) => return Ok(Some(started.elapsed().as_secs_f64() * 1000.0)),
-            Err(error) if is_transient_ssh2_error(&error) => {
-                if started.elapsed() >= timeout {
-                    return Ok(None);
-                }
-                socket_waiter.wait(session, Duration::from_millis(20));
-            }
-            Err(error) => return Err(format!("terminal latency probe failed: {error}")),
+fn poll_channel_health(channel: &mut ssh2::Channel, started_at: Instant) -> HealthProbePoll {
+    let elapsed = started_at.elapsed();
+    match channel.setenv("JOYSHELL_HEALTH_CHECK", "1") {
+        Ok(()) => HealthProbePoll::Alive(elapsed.as_secs_f64() * 1000.0),
+        Err(error) if is_channel_request_denied(&error) => {
+            HealthProbePoll::Alive(elapsed.as_secs_f64() * 1000.0)
         }
+        Err(error) if is_transient_ssh2_error(&error) => {
+            if elapsed >= Duration::from_millis(SSH_HEALTH_TIMEOUT_MS) {
+                HealthProbePoll::Failed("SSH connection timed out.".to_string())
+            } else {
+                HealthProbePoll::Pending
+            }
+        }
+        Err(error) => HealthProbePoll::Failed(format!("SSH connection lost: {error}")),
     }
+}
+
+fn is_channel_request_denied(error: &ssh2::Error) -> bool {
+    error.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED)
 }
 
 fn collect_system_snapshot_from_ssh(
@@ -2289,7 +2383,6 @@ fn establish_ssh_session(
             error
         )
     })?;
-    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     wait_socket.set_nonblocking(true)?;
     session.set_blocking(false);
     Ok((session, channel, wait_socket))
@@ -2356,7 +2449,6 @@ fn establish_authenticated_ssh_session(
         anyhow::bail!("authentication failed");
     }
 
-    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     Ok((session, wait_socket))
 }
 
@@ -2442,5 +2534,18 @@ CPU part    : 0xd03
         assert_eq!(parsed.model_name, "Cortex-A53");
         assert_eq!(parsed.raw_part.as_deref(), Some("0xd03"));
         assert_eq!(parsed.logical_cores, 2);
+    }
+
+    #[test]
+    fn channel_request_denial_confirms_health_reply() {
+        let denied = ssh2::Error::new(
+            ssh2::ErrorCode::Session(LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED),
+            "request denied",
+        );
+        let pending = ssh2::Error::new(ssh2::ErrorCode::Session(-37), "would block");
+
+        assert!(is_channel_request_denied(&denied));
+        assert!(!is_channel_request_denied(&pending));
+        assert!(is_transient_ssh2_error(&pending));
     }
 }

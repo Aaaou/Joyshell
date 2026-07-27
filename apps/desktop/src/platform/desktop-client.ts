@@ -1,4 +1,4 @@
-import * as bridge from "../bridge";
+import * as bridge from "./runtime-client";
 
 /**
  * The desktop feature boundary. It deliberately mirrors the existing bridge

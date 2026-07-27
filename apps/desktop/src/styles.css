@@ -3410,7 +3410,7 @@ button {
   text-align: left;
 }
 
-.appearance-swatch span {
+.appearance-swatch-preview {
   flex: 0 0 auto;
   width: 18px;
   height: 18px;

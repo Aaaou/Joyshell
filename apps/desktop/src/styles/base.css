@@ -686,8 +686,11 @@ button {
 .status-card {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
   gap: 7px;
   padding: 9px;
+  box-sizing: border-box;
   border: 0;
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.18);
@@ -703,6 +706,7 @@ button {
 .status-line,
 .host-address {
   display: flex;
+  min-width: 0;
 }
 
 .status-line,
@@ -714,6 +718,7 @@ button {
 .status-title {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -722,6 +727,8 @@ button {
 }
 
 .build-label {
+  width: 100%;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted-soft);
   font-size: 10px;
@@ -1161,17 +1168,34 @@ button {
   box-shadow: 0 0 0 3px #dff4e8;
 }
 
+.session-status-dot.pending {
+  background: var(--warning);
+  box-shadow: 0 0 0 3px rgba(242, 201, 76, 0.18);
+}
+
+.session-status-dot.offline {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220, 53, 69, 0.12);
+}
+
 .session-os-badge {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.56);
   color: #182230;
-  font-size: 10px;
-  font-weight: 800;
+}
+
+.session-os-badge .operating-system-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.session-os-badge .operating-system-fallback {
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.6;
 }
 
 .session-main {

@@ -3,6 +3,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./ui/App";
 import "./assets/iconfont/iconfont.js";
+import "./assets/os-iconfont/iconfont.js";
 import "./styles/base.css";
 import "./styles/workspace.css";
 import "./styles/overlays.css";

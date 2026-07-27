@@ -1,7 +1,8 @@
 import { Plus, Server } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionProfile } from "../../types";
-import { inferProfileOs } from "../sessions/session-model";
+import { OperatingSystemIcon } from "../../ui/OperatingSystemIcon";
+import { resolveProfileOperatingSystem } from "../sessions/session-model";
 
 export function ConnectionHome({
   profiles,
@@ -16,7 +17,7 @@ export function ConnectionHome({
   onSelect: (profile: SessionProfile) => void;
   onConnect: (profile: SessionProfile) => void;
 }) {
-  const HOME_ORBIT_ITEM_WIDTH = 112;
+  const HOME_ORBIT_ITEM_WIDTH = 136;
   const homeRef = useRef<HTMLDivElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(() => Math.max(0, profiles.findIndex((profile) => profile.id === activeProfileId)));
@@ -334,7 +335,7 @@ export function ConnectionHome({
         onPointerCancel={handlePointerCancel}
       >
         {visibleProfiles.map((profile, index) => {
-          const os = inferProfileOs(profile);
+          const os = resolveProfileOperatingSystem(profile);
           const isSelected = index === highlightedOrbitIndex && profiles[selectedIndex]?.id === profile.id;
           return (
             <div
@@ -353,8 +354,10 @@ export function ConnectionHome({
                 activateHomeProfile(profile, index);
               }}
             >
-              <span className="profile-orbit-icon">{os.label}</span>
-              <small>{profile.host}</small>
+              <span className="profile-orbit-icon" title={os.label}>
+                <OperatingSystemIcon symbolId={os.symbolId} />
+              </span>
+              <small>{profile.name}</small>
             </div>
           );
         })}

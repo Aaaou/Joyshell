@@ -6,3 +6,7 @@ target/
 *.log
 *.local
 apps/desktop/src-tauri/target/
+artifacts/
+build/
+libcrypto-3-x64.def
+libssl-3-x64.def

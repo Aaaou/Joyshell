@@ -2,51 +2,62 @@
 
 ## Problem
 
-The system monitor could show occasional sync failures while the interactive terminal still stayed alive. This made the UI ambiguous:
+The system monitor can fail while the interactive SSH terminal remains alive. These cases must stay separate:
 
-- if the real SSH shell is disconnected, the terminal should visibly close and the session state should become disconnected or failed;
-- if only the side-band system monitor command fails, the terminal should stay connected and the monitor should retry without clearing the whole session.
+- terminal or transport failure closes the session, clears latency, and prints a disconnect notice;
+- monitor or SFTP side-operation failure retries that operation without destroying a healthy shell.
 
-## Reference Behavior
+The former PTY-resize RTT probe was incorrect. SSH `window-change` requests explicitly do not require a reply, so the measured `1ms` was usually local packet submission rather than a server round trip.
 
-Mature SSH clients separate connection health from auxiliary jobs:
+## Source References
 
-- OpenSSH `ServerAliveInterval` / `ServerAliveCountMax` style behavior treats connection death as a result of repeated failed probes, not one transient command failure.
-- WinSCP exposes keepalive and reconnect behavior for long-running sessions/transfers.
-- FileZilla keeps transfers as queue items and retries or resumes them independently of individual operation failures.
+The implementation was checked against concrete upstream source:
 
-The useful UX rule is: terminal channel failure is session failure; monitor/SFTP side operation failure is an operation failure first.
+- OpenSSH portable commit `7e446d3f5917c2f2770981a89d0e54d5d064bf0c`: `clientloop.c::server_alive_check()` sends `keepalive@openssh.com` with `want reply = 1`, counts missed replies, and exits after `ServerAliveCountMax`.
+- libssh2 commit `a7d05f958f4c3414b534107076e8b0f88b233461`: `keepalive.c::libssh2_keepalive_send()` schedules and sends `keepalive@libssh2.org`, but does not expose OpenSSH-style missed-reply tracking to its caller.
+- The same libssh2 commit: `channel.c::channel_setenv()` sends `SSH_MSG_CHANNEL_REQUEST` with `want_reply = 1` and waits for `CHANNEL_SUCCESS` or `CHANNEL_FAILURE`. Either response proves that the SSH peer replied.
+- The same libssh2 file marks `window-change` with `Do not reply`; it cannot be used as an RTT probe.
+- Tabby commit `14e2d60b9b6dee84a53c37f05eefeb803787de04`: `tabby-ssh/src/profiles.ts` defaults keepalive to `5000ms`; `tabby-ssh/src/session/ssh.ts` passes interval/count into the SSH runtime and destroys the session on `disconnect$`; `tabby-ssh/src/components/sshTab.component.ts` prints a concise `session closed` message.
+
+Upstream links:
+
+- <https://github.com/openssh/openssh-portable/blob/7e446d3f5917c2f2770981a89d0e54d5d064bf0c/clientloop.c>
+- <https://github.com/libssh2/libssh2/blob/a7d05f958f4c3414b534107076e8b0f88b233461/src/keepalive.c>
+- <https://github.com/libssh2/libssh2/blob/a7d05f958f4c3414b534107076e8b0f88b233461/src/channel.c>
+- <https://github.com/Eugeny/tabby/tree/14e2d60b9b6dee84a53c37f05eefeb803787de04/tabby-ssh/src>
 
 ## Joyshell Implementation
 
-Backend changes in `crates/joyshell-core/src/session.rs`:
+Backend behavior in `crates/joyshell-core/src/session.rs`:
 
-- SSH keepalive is enabled through libssh2 with a `20s` interval.
-- The worker periodically calls `keepalive_send`; libssh2 decides when a packet is actually needed.
-- Keepalive is enabled only after handshake, authentication, PTY allocation, and shell startup are complete.
-- System sync uses a dedicated timeout:
-  - command timeout: `8s`
-  - reply wait timeout: `18s`
-  - attempts: `2`
-- System sync retry does not mark the SSH session failed.
-- Terminal EOF now emits `Disconnected` and writes `[remote shell closed]` to the terminal.
-- Fatal terminal read/write/flush failure sets session state to `Failed` and drops the runtime SSH handle.
-- Fatal side-channel errors such as `Unable to startup channel`, `Session(-21)`, channel open failure, or socket disconnect now mark the whole SSH session as `Failed`, append a short terminal notice, and stop the SSH worker.
+- The interactive SSH worker starts one response-required health request every `5s`.
+- ssh2/libssh2 does not expose an arbitrary OpenSSH global-request API, so Joyshell uses a harmless `channel.setenv("JOYSHELL_HEALTH_CHECK", "1")` request. Success and explicit denial both prove liveness; `EAGAIN` remains pending.
+- The request is polled non-blockingly after terminal reads and writes. It does not execute a shell command and does not occupy an SFTP worker.
+- A pending request has a `3s` deadline. Timeout or a fatal transport/channel error changes the session to `Failed`.
+- Terminal EOF changes the session to `Disconnected`.
+- The old PTY resize probe and the untracked `keepalive_send()` loop were removed.
+- System sync keeps its independent `8s` command timeout and two attempts. A sync failure alone does not close SSH.
+- SFTP and monitor sessions remain independent from the interactive terminal session.
 
-Frontend changes in `apps/desktop/src/ui/App.tsx`:
+Frontend behavior in `apps/desktop/src/app/JoyshellApp.tsx` and `features/terminal/use-terminal-runtime.ts`:
 
-- System sync has an in-flight guard so a slow sync cannot stack multiple monitor commands.
-- Consecutive monitor failures are counted.
-- The UI shows `同步重试中 1/3` for transient monitor failures while keeping the last known snapshot visible.
+- `Failed` or `Disconnected` immediately sets latency to `--` and disables SSH-dependent controls.
+- The terminal writes one deduplicated `[disconnected] ...` notice from the state event.
+- System sync has an in-flight guard and shows `同步重试中 1/3` for transient failures.
 - Successful sync resets the failure count and returns to `已同步`.
-- SSH/SFTP/monitor controls treat only `Connected` as an active interactive session. `Failed` and `Disconnected` immediately disable side operations.
 
-## Current Limits
+## Validation
 
-This does not yet implement full automatic SSH reconnection for an already dead terminal session. The next stage should add:
+- Unit test confirms libssh2 `CHANNEL_REQUEST_DENIED` is treated as a valid peer reply.
+- A real SSH probe through `127.0.0.1:2222` remained interactive across more than two `5s` health intervals and executed a second command successfully.
+- A stopped-server/tunnel test is still required before release to confirm the complete `5-8s` failure path in the packaged WebView.
 
-- profile-bound reconnect worker,
-- terminal reconnection banner,
-- optional auto-reconnect policy per session,
-- SFTP queue resume after reconnect,
-- audit entries for reconnect attempts and results.
+## Reconnection Policy
+
+Joyshell does not silently reconnect a dead interactive shell. A new SSH channel cannot restore the remote process, working directory, foreground application, or unsaved terminal state. A future opt-in mode should use:
+
+- explicit `Reconnecting` state and terminal banner;
+- bounded exponential backoff;
+- a user-visible retry/cancel action;
+- SFTP queue resume only for resumable items;
+- audit entries for every reconnect attempt and result.

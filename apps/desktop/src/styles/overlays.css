@@ -590,6 +590,42 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.26);
 }
 
+.general-settings-page .settings-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 46px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+}
+
+.settings-select-row span,
+.settings-select-row b,
+.settings-select-row small {
+  display: block;
+}
+
+.settings-select-row small {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.settings-select-row select {
+  width: 150px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(31, 35, 40, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+  padding: 0 8px;
+}
+
 .general-settings-page .settings-toggle-row small {
   margin-top: 1px;
   font-size: 11px;
@@ -636,7 +672,7 @@
   text-align: left;
 }
 
-.appearance-swatch span {
+.appearance-swatch-preview {
   flex: 0 0 auto;
   width: 18px;
   height: 18px;

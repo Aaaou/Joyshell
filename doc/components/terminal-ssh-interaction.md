@@ -13,8 +13,10 @@ This component covers the first usable SSH terminal path:
 Main files:
 
 - `packages/terminal/src/index.tsx`
-- `apps/desktop/src/ui/App.tsx`
-- `apps/desktop/src/bridge.ts`
+- `apps/desktop/src/app/JoyshellApp.tsx`
+- `apps/desktop/src/features/terminal/use-terminal-runtime.ts`
+- `apps/desktop/src/platform/runtime-client.ts`
+- `apps/desktop/src/platform/use-session-events.ts`
 - `apps/desktop/src-tauri/src/lib.rs`
 - `crates/joyshell-core/src/session.rs`
 
@@ -113,13 +115,7 @@ Resolution:
 - Enabled `ssh2`'s Windows OpenSSL backend:
 
 ```toml
-ssh2 = { version = "0.9", features = ["openssl-on-win32"] }
-```
-
-- Built with:
-
-```powershell
-$env:OPENSSL_DIR='D:\miniconda3\Library'
+ssh2 = { version = "0.9", features = ["openssl-on-win32", "vendored-openssl"] }
 ```
 
 - Confirmed `ssh2/libssh2` then exposed modern algorithms:
@@ -205,7 +201,7 @@ This is a temporary robustness layer for MVP. Long term, terminal output should 
 flowchart LR
   User["Keyboard / Command Dock"] --> Xterm["packages/terminal: xterm.js wrapper"]
   Xterm --> App["apps/desktop React App"]
-  App --> Bridge["bridge.ts invoke(write_terminal)"]
+  App --> Bridge["DesktopClient invoke(write_terminal)"]
   Bridge --> Tauri["Tauri command"]
   Tauri --> Core["joyshell-core SessionManager"]
   Core --> SSH["ssh2/libssh2 Channel"]
@@ -262,12 +258,12 @@ C:\Users\EDY\.cargo\bin\cargo.exe test --workspace
 pnpm -r typecheck
 ```
 
-Real SSH probe:
+Real SSH probe（使用本地测试环境变量，不要把真实凭据提交到仓库）：
 
 ```powershell
-$env:JOYSHELL_SSH_HOST='192.168.110.24'
-$env:JOYSHELL_SSH_USER='root'
-$env:JOYSHELL_SSH_PASSWORD='yujiarong520'
+$env:JOYSHELL_SSH_HOST='ssh.example.internal'
+$env:JOYSHELL_SSH_USER='test-user'
+$env:JOYSHELL_SSH_PASSWORD='<password>'
 $env:JOYSHELL_SSH_PORT='22'
 C:\Users\EDY\.cargo\bin\cargo.exe run -p joyshell-core --example ssh_probe
 ```
@@ -290,7 +286,7 @@ pnpm --filter @joyshell/desktop tauri build --bundles nsis
 Generated installer:
 
 ```text
-target/release/bundle/nsis/Joyshell_0.1.0_x64-setup.exe
+target/release/bundle/nsis/Joyshell_0.1.43_x64-setup.exe
 ```
 
 ## Current Build Marker
@@ -298,7 +294,7 @@ target/release/bundle/nsis/Joyshell_0.1.0_x64-setup.exe
 The tested build marker is:
 
 ```text
-0.1.0 terminal-sync-20260721
+0.1.43 conservative-ui-decoupling-20260724
 ```
 
 The marker is displayed in the left status card so testers can confirm they are running the intended package.

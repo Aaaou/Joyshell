@@ -8,8 +8,10 @@ It currently displays:
 
 - host name, OS, kernel, architecture, primary IP
 - CPU model and logical core count
+- CPU frequency and ARM CPU-part name mapping where available
 - CPU usage
 - memory usage
+- memory module frequency where `dmidecode` is available
 - swap usage
 - load average
 - uptime
@@ -24,10 +26,12 @@ Main files:
 - `crates/joyshell-core/src/session.rs`
 - `crates/joyshell-core/examples/system_probe.rs`
 - `apps/desktop/src-tauri/src/lib.rs`
-- `apps/desktop/src/bridge.ts`
+- `apps/desktop/src/platform/runtime-client.ts`
 - `apps/desktop/src/types.ts`
-- `apps/desktop/src/ui/App.tsx`
-- `apps/desktop/src/styles.css`
+- `apps/desktop/src/app/JoyshellApp.tsx`
+- `apps/desktop/src/features/system-info/SystemInfoDialog.tsx`
+- `apps/desktop/src/features/system-info/system-model.ts`
+- `apps/desktop/src/styles/workspace.css`
 
 ## Mature References
 
@@ -86,6 +90,7 @@ This keeps monitoring independent from the user terminal channel.
 - raw `cpu` jiffies
 - `cpu_cores[]` raw per-core jiffies
 - `cpu_info.model_name/logical_cores/physical_cores/mhz`
+- `memory_info.frequency_mhz`
 - `memory.total/used/free/available`
 - `swap.total/used/free/available`
 - `processes.total/running/sleeping/stopped/zombie/threads`
@@ -123,33 +128,33 @@ The UI now includes:
 ## Implementation Notes
 
 - The monitor command uses explicit section markers such as `__JOYSHELL_STAT__` and `__JOYSHELL_DF__`; this avoids fragile positional parsing across mixed command output.
+- Memory frequency uses the first valid configured module speed instead of adding per-DIMM frequencies. Two DDR4-3200 modules still display `3200 MHz`, not `6400 MHz`.
+- ARM systems that only expose a CPU implementer/part value are mapped to readable core names where the mapping is known; the raw model remains available in details.
 - Host information parsing must ignore the blank line immediately after each section marker, otherwise hostname/OS/kernel fields shift by one line.
 - CPU percentage is not read directly from Linux. It is derived from two `/proc/stat` samples, matching mature monitor behavior.
 - Memory usage follows the `free`/psutil style: `used = MemTotal - MemAvailable`, not `MemTotal - MemFree`.
 - Filesystem capacity uses `df -kPT` when available so filesystem type is included; it falls back to `df -kP`.
 - inode usage is collected separately with `df -iP` and joined by mount point.
-- Monitoring currently opens a blocking exec channel inside the SSH worker. If sampling ever causes terminal latency, move monitoring to a dedicated SSH connection or non-blocking exec loop.
+- Monitoring runs through a side SSH session in `spawn_blocking`; it no longer shares the interactive terminal worker. A future persistent monitor connection could reduce repeated authentication overhead.
 
 ## Verification
 
 Run against the Cloudflare tunnel endpoint:
 
 ```powershell
-$env:OPENSSL_DIR='D:\miniconda3\Library'
 $env:JOYSHELL_SSH_HOST='127.0.0.1'
-$env:JOYSHELL_SSH_USER='root'
-$env:JOYSHELL_SSH_PASSWORD='yujiarong520'
+$env:JOYSHELL_SSH_USER='test-user'
+$env:JOYSHELL_SSH_PASSWORD='<password>'
 $env:JOYSHELL_SSH_PORT='2222'
 C:\Users\EDY\.cargo\bin\cargo.exe run -p joyshell-core --example system_probe
 ```
 
-Run against the LAN test host:
+Run against a direct SSH host:
 
 ```powershell
-$env:OPENSSL_DIR='D:\miniconda3\Library'
-$env:JOYSHELL_SSH_HOST='192.168.110.24'
-$env:JOYSHELL_SSH_USER='root'
-$env:JOYSHELL_SSH_PASSWORD='yujiarong520'
+$env:JOYSHELL_SSH_HOST='ssh.example.internal'
+$env:JOYSHELL_SSH_USER='test-user'
+$env:JOYSHELL_SSH_PASSWORD='<password>'
 $env:JOYSHELL_SSH_PORT='22'
 C:\Users\EDY\.cargo\bin\cargo.exe run -p joyshell-core --example system_probe
 ```
@@ -169,7 +174,7 @@ Expected output includes:
 
 ## Follow-up Work
 
-1. Move monitor exec to a non-blocking channel loop if sampling ever causes visible terminal latency.
+1. Reuse a persistent monitor side connection if repeated authentication becomes measurable.
 2. Add per-interface chart history and selectable NIC.
 3. Add per-core CPU bars using `cpu_cores[]` deltas.
 4. Add process list and top processes.

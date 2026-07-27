@@ -7,6 +7,7 @@ export type SessionProfile = {
   latency_probe_host?: string | null;
   latency_probe_port?: number | null;
   use_terminal_latency_probe?: boolean;
+  operating_system?: string | null;
   username: string;
   tags: string[];
   favorite: boolean;
@@ -49,10 +50,13 @@ export type LayoutSettings = {
   terminal_background_apply_workspace: boolean;
   terminal_background_apply_home: boolean;
   chrome_gradient_preset: ChromeGradientPreset;
+  bottom_panel_height: number;
+  connected_profile_double_click_action: "open_earliest" | "new_session";
 };
 
 export type SessionInfo = {
   id: string;
+  profile_id: string;
   profile_name: string;
   host: string;
   port: number;

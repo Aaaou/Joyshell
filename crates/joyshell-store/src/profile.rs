@@ -45,6 +45,8 @@ pub struct LayoutSettings {
     pub terminal_background_apply_workspace: bool,
     pub terminal_background_apply_home: bool,
     pub chrome_gradient_preset: String,
+    pub bottom_panel_height: u16,
+    pub connected_profile_double_click_action: String,
 }
 
 impl Default for LayoutSettings {
@@ -65,6 +67,8 @@ impl Default for LayoutSettings {
             terminal_background_apply_workspace: true,
             terminal_background_apply_home: true,
             chrome_gradient_preset: "codex_cyan".to_string(),
+            bottom_panel_height: 390,
+            connected_profile_double_click_action: "open_earliest".to_string(),
         }
     }
 }
@@ -140,9 +144,9 @@ impl ProfileRepository {
                     "
                     insert into session_profiles (
                         id, name, group_name, host, port, latency_probe_host, latency_probe_port, use_terminal_latency_probe, username, auth_method_json,
-                        host_key_policy, tags_json, favorite, sort_order, jump_host_id, updated_at
+                        host_key_policy, tags_json, favorite, sort_order, jump_host_id, operating_system, updated_at
                     )
-                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))
+                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, datetime('now'))
                     on conflict(id) do update set
                         name = excluded.name,
                         group_name = excluded.group_name,
@@ -158,6 +162,7 @@ impl ProfileRepository {
                         favorite = excluded.favorite,
                         sort_order = excluded.sort_order,
                         jump_host_id = excluded.jump_host_id,
+                        operating_system = excluded.operating_system,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -177,6 +182,7 @@ impl ProfileRepository {
                         profile.favorite,
                         profile.sort_order,
                         profile.jump_host_id.map(|id| id.to_string()),
+                        profile.operating_system,
                     ],
                 )?;
                 Ok(())
@@ -193,7 +199,7 @@ impl ProfileRepository {
                     "
                     select id, name, group_name, host, port, username, auth_method_json,
                            host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                           latency_probe_host, latency_probe_port, use_terminal_latency_probe
+                           latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system
                     from session_profiles
                     order by favorite desc, coalesce(group_name, ''), sort_order asc, name asc
                     ",
@@ -218,7 +224,7 @@ impl ProfileRepository {
                         "
                         select id, name, group_name, host, port, username, auth_method_json,
                                host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                               latency_probe_host, latency_probe_port, use_terminal_latency_probe
+                               latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system
                         from session_profiles
                         where id = ?1
                         ",
@@ -519,7 +525,9 @@ impl ProfileRepository {
                         terminal_background_opacity,
                         terminal_background_apply_workspace,
                         terminal_background_apply_home,
-                        chrome_gradient_preset
+                        chrome_gradient_preset,
+                         bottom_panel_height,
+                         connected_profile_double_click_action
                         from layout_settings
                         where id = 'default'
                         ",
@@ -541,6 +549,8 @@ impl ProfileRepository {
                                 terminal_background_apply_workspace: row.get(12)?,
                                 terminal_background_apply_home: row.get(13)?,
                                 chrome_gradient_preset: row.get(14)?,
+                                bottom_panel_height: row.get(15)?,
+                                connected_profile_double_click_action: row.get(16)?,
                             })
                         },
                     )
@@ -579,9 +589,11 @@ impl ProfileRepository {
                         terminal_background_apply_workspace,
                         terminal_background_apply_home,
                         chrome_gradient_preset,
+                        bottom_panel_height,
+                        connected_profile_double_click_action,
                         updated_at
                     )
-                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))
+                    values ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, datetime('now'))
                     on conflict(id) do update set
                         restore_last_layout = excluded.restore_last_layout,
                         default_left_sidebar_open = excluded.default_left_sidebar_open,
@@ -598,6 +610,8 @@ impl ProfileRepository {
                         terminal_background_apply_workspace = excluded.terminal_background_apply_workspace,
                         terminal_background_apply_home = excluded.terminal_background_apply_home,
                         chrome_gradient_preset = excluded.chrome_gradient_preset,
+                        bottom_panel_height = excluded.bottom_panel_height,
+                        connected_profile_double_click_action = excluded.connected_profile_double_click_action,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -616,6 +630,8 @@ impl ProfileRepository {
                         settings.terminal_background_apply_workspace,
                         settings.terminal_background_apply_home,
                         settings.chrome_gradient_preset,
+                        settings.bottom_panel_height,
+                        settings.connected_profile_double_click_action,
                     ],
                 )?;
                 Ok(settings)
@@ -644,6 +660,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             latency_probe_host text null,
             latency_probe_port integer null,
             use_terminal_latency_probe integer not null default 0,
+            operating_system text null,
             username text not null,
             auth_method_json text not null,
             host_key_policy text not null,
@@ -692,6 +709,8 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             terminal_background_apply_workspace integer not null default 1,
             terminal_background_apply_home integer not null default 1,
             chrome_gradient_preset text not null default 'codex_cyan',
+            bottom_panel_height integer not null default 390,
+            connected_profile_double_click_action text not null default 'open_earliest',
             updated_at text not null default (datetime('now'))
         );
         ",
@@ -742,11 +761,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "skip_delete_confirmations",
         "integer not null default 0",
     )?;
-    ensure_layout_column(
-        connection,
-        "splash_center_image_data_url",
-        "text null",
-    )?;
+    ensure_layout_column(connection, "splash_center_image_data_url", "text null")?;
     ensure_layout_column(
         connection,
         "terminal_background_image_data_url",
@@ -772,6 +787,16 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "chrome_gradient_preset",
         "text not null default 'codex_cyan'",
     )?;
+    ensure_layout_column(
+        connection,
+        "bottom_panel_height",
+        "integer not null default 390",
+    )?;
+    ensure_layout_column(
+        connection,
+        "connected_profile_double_click_action",
+        "text not null default 'open_earliest'",
+    )?;
     ensure_table_column(
         connection,
         "session_profiles",
@@ -796,6 +821,12 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "use_terminal_latency_probe",
         "integer not null default 0",
     )?;
+    ensure_table_column(
+        connection,
+        "session_profiles",
+        "operating_system",
+        "text null",
+    )?;
 
     Ok(())
 }
@@ -816,6 +847,7 @@ fn read_profile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionProfile>
         latency_probe_host: row.get(12)?,
         latency_probe_port: row.get(13)?,
         use_terminal_latency_probe: row.get(14)?,
+        operating_system: row.get(15)?,
         username: row.get(5)?,
         auth_method: serde_json::from_str::<AuthMethod>(&auth_method_json)
             .map_err(json_from_sql_error)?,
@@ -925,4 +957,174 @@ fn crypto_to_sql_error(error: impl Debug) -> rusqlite::Error {
         io::ErrorKind::InvalidData,
         format!("secret encryption failed: {error:?}"),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_and_persists_detected_operating_system() {
+        let database_path =
+            std::env::temp_dir().join(format!("joyshell-profile-os-{}.db", Uuid::new_v4()));
+        let profile_id = Uuid::new_v4();
+        let legacy_connection = Connection::open(&database_path).expect("open legacy database");
+        legacy_connection
+            .execute_batch(
+                "
+                create table session_profiles (
+                    id text primary key,
+                    name text not null,
+                    group_name text null,
+                    host text not null,
+                    port integer not null,
+                    latency_probe_host text null,
+                    latency_probe_port integer null,
+                    use_terminal_latency_probe integer not null default 0,
+                    username text not null,
+                    auth_method_json text not null,
+                    host_key_policy text not null,
+                    tags_json text not null default '[]',
+                    favorite integer not null default 0,
+                    sort_order integer not null default 0,
+                    jump_host_id text null,
+                    created_at text not null default (datetime('now')),
+                    updated_at text not null default (datetime('now'))
+                );
+                ",
+            )
+            .expect("create legacy schema");
+        drop(legacy_connection);
+
+        let repository = ProfileRepository::sqlite(&database_path).expect("open profile database");
+        repository
+            .upsert_profile(SessionProfile {
+                id: profile_id,
+                name: "Ubuntu server".to_string(),
+                group: None,
+                host: "example.internal".to_string(),
+                port: 22,
+                latency_probe_host: None,
+                latency_probe_port: None,
+                use_terminal_latency_probe: false,
+                operating_system: Some("Ubuntu 24.04 LTS".to_string()),
+                username: "tester".to_string(),
+                auth_method: AuthMethod::Password {
+                    secret_ref: "test://password".to_string(),
+                },
+                host_key_policy: HostKeyPolicy::AcceptNew,
+                tags: Vec::new(),
+                favorite: false,
+                sort_order: 0,
+                jump_host_id: None,
+            })
+            .expect("save profile");
+
+        let saved = repository
+            .get_profile(profile_id)
+            .expect("read profile")
+            .expect("saved profile exists");
+        assert_eq!(saved.operating_system.as_deref(), Some("Ubuntu 24.04 LTS"));
+
+        drop(repository);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
+
+    #[test]
+    fn migrates_and_persists_bottom_panel_height() {
+        let database_path =
+            std::env::temp_dir().join(format!("joyshell-layout-height-{}.db", Uuid::new_v4()));
+        let legacy_connection = Connection::open(&database_path).expect("open legacy database");
+        legacy_connection
+            .execute_batch(
+                "
+                create table layout_settings (
+                    id text primary key,
+                    restore_last_layout integer not null default 0,
+                    default_left_sidebar_open integer not null default 1,
+                    default_right_sidebar_open integer not null default 1,
+                    default_bottom_panel_open integer not null default 1,
+                    last_left_sidebar_open integer not null default 1,
+                    last_right_sidebar_open integer not null default 1,
+                    last_bottom_panel_open integer not null default 1,
+                    use_icmp_latency_probe integer not null default 0,
+                    skip_delete_confirmations integer not null default 0,
+                    splash_center_image_data_url text null,
+                    terminal_background_image_data_url text null,
+                    terminal_background_opacity integer not null default 35,
+                    terminal_background_apply_workspace integer not null default 1,
+                    terminal_background_apply_home integer not null default 1,
+                    chrome_gradient_preset text not null default 'codex_cyan',
+                    updated_at text not null default (datetime('now'))
+                );
+                ",
+            )
+            .expect("create legacy layout schema");
+        drop(legacy_connection);
+
+        let repository = ProfileRepository::sqlite(&database_path).expect("open profile database");
+        let migrated = repository
+            .get_layout_settings()
+            .expect("read migrated layout");
+        assert_eq!(migrated.bottom_panel_height, 390);
+
+        let saved = repository
+            .save_layout_settings(LayoutSettings {
+                bottom_panel_height: 180,
+                ..migrated
+            })
+            .expect("save resized layout");
+        assert_eq!(saved.bottom_panel_height, 180);
+        assert_eq!(
+            repository
+                .get_layout_settings()
+                .expect("read resized layout")
+                .bottom_panel_height,
+            180
+        );
+
+        drop(repository);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
+
+    #[test]
+    fn migrates_and_persists_connected_profile_double_click_action() {
+        let database_path = std::env::temp_dir().join(format!(
+            "joyshell-layout-double-click-{}.db",
+            Uuid::new_v4()
+        ));
+        let repository = ProfileRepository::sqlite(&database_path).expect("open profile database");
+
+        let defaults = repository
+            .get_layout_settings()
+            .expect("read default layout");
+        assert_eq!(
+            defaults.connected_profile_double_click_action,
+            "open_earliest"
+        );
+
+        let saved = repository
+            .save_layout_settings(LayoutSettings {
+                connected_profile_double_click_action: "new_session".to_string(),
+                ..defaults
+            })
+            .expect("save double-click action");
+        assert_eq!(saved.connected_profile_double_click_action, "new_session");
+        assert_eq!(
+            repository
+                .get_layout_settings()
+                .expect("read saved double-click action")
+                .connected_profile_double_click_action,
+            "new_session"
+        );
+
+        drop(repository);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
 }

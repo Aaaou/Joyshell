@@ -1,0 +1,65 @@
+{
+  "id": "5215323",
+  "name": "操作系统图标",
+  "font_family": "iconfont",
+  "css_prefix_text": "icon-",
+  "description": "",
+  "glyphs": [
+    {
+      "icon_id": "4392619",
+      "name": "red-hat",
+      "font_class": "icon-test",
+      "unicode": "e612",
+      "unicode_decimal": 58898
+    },
+    {
+      "icon_id": "11983514",
+      "name": "windows",
+      "font_class": "windows",
+      "unicode": "ea06",
+      "unicode_decimal": 59910
+    },
+    {
+      "icon_id": "12866660",
+      "name": "macos",
+      "font_class": "macos",
+      "unicode": "e642",
+      "unicode_decimal": 58946
+    },
+    {
+      "icon_id": "21438975",
+      "name": "alpine",
+      "font_class": "alpine",
+      "unicode": "e6ec",
+      "unicode_decimal": 59116
+    },
+    {
+      "icon_id": "23489938",
+      "name": "Ubuntu",
+      "font_class": "Ubuntu",
+      "unicode": "ef63",
+      "unicode_decimal": 61283
+    },
+    {
+      "icon_id": "26252870",
+      "name": "centos",
+      "font_class": "centos-stream",
+      "unicode": "e600",
+      "unicode_decimal": 58880
+    },
+    {
+      "icon_id": "30099009",
+      "name": "fedora",
+      "font_class": "fedora",
+      "unicode": "e601",
+      "unicode_decimal": 58881
+    },
+    {
+      "icon_id": "37105278",
+      "name": "freebsd",
+      "font_class": "freebsd",
+      "unicode": "e6e9",
+      "unicode_decimal": 59113
+    }
+  ]
+}

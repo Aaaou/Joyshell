@@ -161,6 +161,7 @@ fn save_profile(
 async fn connect_profile(
     state: State<'_, AppState>,
     profile_id: Uuid,
+    session_id: Option<Uuid>,
 ) -> Result<SessionInfo, String> {
     let profile = state
         .profiles
@@ -201,7 +202,11 @@ async fn connect_profile(
     };
     let handle = state
         .sessions
-        .connect_ssh_password(profile.clone(), password)
+        .connect_ssh_password_for_session(
+            profile.clone(),
+            password,
+            session_id.unwrap_or_else(Uuid::new_v4),
+        )
         .await
         .map_err(|error| error.to_string())?;
     state.audit.record(
@@ -219,10 +224,10 @@ async fn connect_profile(
 }
 
 #[tauri::command]
-async fn disconnect_profile(state: State<'_, AppState>, profile_id: Uuid) -> Result<(), String> {
+async fn disconnect_profile(state: State<'_, AppState>, session_id: Uuid) -> Result<(), String> {
     state
         .sessions
-        .disconnect(profile_id)
+        .disconnect(session_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -332,11 +337,30 @@ async fn collect_system_snapshot(
     state: State<'_, AppState>,
     session_id: Uuid,
 ) -> Result<SystemSnapshot, String> {
-    state
+    let snapshot = state
         .sessions
         .collect_system_snapshot(session_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    let detected_os = snapshot.host.os_name.trim();
+    if !detected_os.is_empty() {
+        if let Some(mut profile) = state
+            .profiles
+            .get_profile(session_id)
+            .map_err(|error| error.to_string())?
+        {
+            if profile.operating_system.as_deref() != Some(detected_os) {
+                profile.operating_system = Some(detected_os.to_string());
+                state
+                    .profiles
+                    .upsert_profile(profile)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+
+    Ok(snapshot)
 }
 
 #[tauri::command]
