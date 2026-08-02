@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -73,6 +73,47 @@ fn derive_local_secret_key(database_path: &Path) -> [u8; 32] {
 struct SaveProfilePayload {
     profile: SessionProfile,
     password: Option<String>,
+    private_key_passphrase: Option<String>,
+}
+
+fn save_secret(state: &AppState, secret_ref: &str, value: Option<String>) -> Result<(), String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    state
+        .secrets
+        .write()
+        .map_err(|_| "secret store is unavailable".to_string())?
+        .insert(secret_ref.to_string(), value.clone());
+    state
+        .profiles
+        .upsert_secret(secret_ref, &value, &state.secret_key)
+        .map_err(|error| error.to_string())
+}
+
+fn load_secret(state: &AppState, secret_ref: &str) -> Result<Option<String>, String> {
+    let cached = state
+        .secrets
+        .read()
+        .map_err(|_| "secret store is unavailable".to_string())?
+        .get(secret_ref)
+        .cloned();
+    if cached.is_some() {
+        return Ok(cached);
+    }
+
+    let stored = state
+        .profiles
+        .get_secret(secret_ref, &state.secret_key)
+        .map_err(|error| error.to_string())?;
+    if let Some(value) = &stored {
+        state
+            .secrets
+            .write()
+            .map_err(|_| "secret store is unavailable".to_string())?
+            .insert(secret_ref.to_string(), value.clone());
+    }
+    Ok(stored)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,16 +172,26 @@ fn save_profile(
     payload: SaveProfilePayload,
 ) -> Result<SessionProfile, String> {
     let profile = payload.profile;
-    if let AuthMethod::Password { secret_ref } = &profile.auth_method {
-        if let Some(password) = payload.password.filter(|value| !value.is_empty()) {
-            if let Ok(mut secrets) = state.secrets.write() {
-                secrets.insert(secret_ref.clone(), password.clone());
-            }
-            state
-                .profiles
-                .upsert_secret(secret_ref, &password, &state.secret_key)
-                .map_err(|error| error.to_string())?;
+    match &profile.auth_method {
+        AuthMethod::Password { secret_ref } => {
+            save_secret(&state, secret_ref, payload.password)?;
         }
+        AuthMethod::PrivateKey {
+            key_ref,
+            passphrase_ref,
+        } => {
+            let key_path = Path::new(key_ref);
+            if !key_path.is_file() {
+                return Err(format!(
+                    "private key file was not found: {}",
+                    key_path.display()
+                ));
+            }
+            if let Some(passphrase_ref) = passphrase_ref {
+                save_secret(&state, passphrase_ref, payload.private_key_passphrase)?;
+            }
+        }
+        AuthMethod::Agent => {}
     }
     state
         .profiles
@@ -168,47 +219,40 @@ async fn connect_profile(
         .get_profile(profile_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "profile was not found".to_string())?;
-    let password = match &profile.auth_method {
+    let session_id = session_id.unwrap_or_else(Uuid::new_v4);
+    let handle = match &profile.auth_method {
         AuthMethod::Password { secret_ref } => {
-            let cached = state
-                .secrets
-                .read()
-                .map_err(|_| "secret store is unavailable".to_string())?
-                .get(secret_ref)
-                .cloned();
-            match cached {
-                Some(password) => password,
-                None => {
-                    let password = state
-                        .profiles
-                        .get_secret(secret_ref, &state.secret_key)
-                        .map_err(|error| error.to_string())?
-                        .ok_or_else(|| {
-                            "password is missing; open SSH settings and save it again".to_string()
-                        })?;
-                    if let Ok(mut secrets) = state.secrets.write() {
-                        secrets.insert(secret_ref.clone(), password.clone());
-                    }
-                    password
-                }
-            }
+            let password = load_secret(&state, secret_ref)?.ok_or_else(|| {
+                "password is missing; open SSH settings and save it again".to_string()
+            })?;
+            state
+                .sessions
+                .connect_ssh_password_for_session(profile.clone(), password, session_id)
+                .await
         }
-        AuthMethod::PrivateKey { .. } => {
-            return Err("private key authentication is not implemented yet".to_string())
+        AuthMethod::PrivateKey {
+            key_ref,
+            passphrase_ref,
+        } => {
+            let passphrase = match passphrase_ref {
+                Some(secret_ref) => load_secret(&state, secret_ref)?,
+                None => None,
+            };
+            state
+                .sessions
+                .connect_ssh_private_key_for_session(
+                    profile.clone(),
+                    PathBuf::from(key_ref),
+                    passphrase,
+                    session_id,
+                )
+                .await
         }
         AuthMethod::Agent => {
             return Err("SSH agent authentication is not implemented yet".to_string())
         }
-    };
-    let handle = state
-        .sessions
-        .connect_ssh_password_for_session(
-            profile.clone(),
-            password,
-            session_id.unwrap_or_else(Uuid::new_v4),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    }
+    .map_err(|error| error.to_string())?;
     state.audit.record(
         "user",
         Some(handle.id()),

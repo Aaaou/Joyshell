@@ -56,6 +56,15 @@ pub enum AuthMethod {
     Agent,
 }
 
+#[derive(Clone)]
+pub enum SshCredential {
+    Password(String),
+    PrivateKey {
+        key_path: PathBuf,
+        passphrase: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionProfile {
     pub id: SessionId,
@@ -243,7 +252,7 @@ pub enum SessionError {
 struct SessionRuntime {
     info: SessionInfo,
     profile: SessionProfile,
-    password: String,
+    credential: SshCredential,
     output_tail: VecDeque<String>,
     ssh: Option<SshRuntime>,
     runtime_token: Uuid,
@@ -331,7 +340,7 @@ impl SessionManager {
         password: String,
     ) -> Result<SshSessionHandle, SessionError> {
         let session_id = profile.id;
-        self.connect_ssh_password_for_session(profile, password, session_id)
+        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id)
             .await
     }
 
@@ -339,6 +348,34 @@ impl SessionManager {
         &self,
         profile: SessionProfile,
         password: String,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id)
+            .await
+    }
+
+    pub async fn connect_ssh_private_key_for_session(
+        &self,
+        profile: SessionProfile,
+        key_path: PathBuf,
+        passphrase: Option<String>,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            SshCredential::PrivateKey {
+                key_path,
+                passphrase,
+            },
+            session_id,
+        )
+        .await
+    }
+
+    async fn connect_ssh_for_session(
+        &self,
+        profile: SessionProfile,
+        credential: SshCredential,
         session_id: SessionId,
     ) -> Result<SshSessionHandle, SessionError> {
         let now = Utc::now();
@@ -359,7 +396,7 @@ impl SessionManager {
             SessionRuntime {
                 info: connecting_info,
                 profile: profile.clone(),
-                password: password.clone(),
+                credential: credential.clone(),
                 output_tail: VecDeque::new(),
                 ssh: None,
                 runtime_token: Uuid::new_v4(),
@@ -381,9 +418,9 @@ impl SessionManager {
         );
 
         let profile_for_connect = profile.clone();
-        let password_for_connect = password.clone();
+        let credential_for_connect = credential.clone();
         let connect_result = tokio::task::spawn_blocking(move || {
-            establish_ssh_session(&profile_for_connect, &password_for_connect)
+            establish_ssh_session(&profile_for_connect, &credential_for_connect)
         })
         .await
         .map_err(|error| SessionError::ConnectionFailed(error.to_string()))?;
@@ -546,9 +583,9 @@ impl SessionManager {
         &self,
         session_id: SessionId,
     ) -> Result<SystemSnapshot, SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         tokio::task::spawn_blocking(move || {
-            let (session, wait_socket) = establish_ssh_side_session(&profile, &password)?;
+            let (session, wait_socket) = establish_ssh_side_session(&profile, &credential)?;
             let mut socket_waiter = SocketWaiter::new(wait_socket);
             collect_system_snapshot_with_retry(&session, &mut socket_waiter)
         })
@@ -562,9 +599,9 @@ impl SessionManager {
         session_id: SessionId,
         path: String,
     ) -> Result<RemoteDirectoryListing, SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)?;
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
             list_sftp_directory_from_ssh(&session, &path)
         })
         .await
@@ -577,9 +614,9 @@ impl SessionManager {
         session_id: SessionId,
         path: String,
     ) -> Result<(), SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)?;
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
             create_sftp_dir_from_ssh(&session, &path)
         })
         .await
@@ -593,9 +630,9 @@ impl SessionManager {
         path: String,
         is_dir: bool,
     ) -> Result<(), SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)?;
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
             delete_sftp_path_from_ssh(&session, &path, is_dir)
         })
         .await
@@ -609,9 +646,9 @@ impl SessionManager {
         from: String,
         to: String,
     ) -> Result<(), SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)?;
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
             rename_sftp_path_from_ssh(&session, &from, &to)
         })
         .await
@@ -626,13 +663,13 @@ impl SessionManager {
         remote_path: String,
         local_path: String,
     ) -> Result<SftpProgress, SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
         let manager = self.clone();
         let progress_remote_path = remote_path.clone();
         let progress_local_path = local_path.clone();
         let transfer_result = tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)
                 .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             download_sftp_file_from_ssh(
                 &session,
@@ -678,7 +715,7 @@ impl SessionManager {
         local_path: String,
         remote_path: String,
     ) -> Result<SftpProgress, SessionError> {
-        let (profile, password) = self.side_connection_credentials(session_id)?;
+        let (profile, credential) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
         let manager = self.clone();
         let progress_remote_path = remote_path.clone();
@@ -687,7 +724,7 @@ impl SessionManager {
             .ok()
             .map(|metadata| metadata.len());
         let transfer_result = tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &password)
+            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)
                 .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             upload_sftp_file_from_ssh(
                 &session,
@@ -738,7 +775,7 @@ impl SessionManager {
     fn side_connection_credentials(
         &self,
         session_id: SessionId,
-    ) -> Result<(SessionProfile, String), SessionError> {
+    ) -> Result<(SessionProfile, SshCredential), SessionError> {
         let sessions = self.sessions.read();
         let runtime = sessions
             .get(&session_id)
@@ -746,7 +783,7 @@ impl SessionManager {
         if runtime.info.state != ConnectionState::Connected || runtime.ssh.is_none() {
             return Err(SessionError::NotConnected(session_id));
         }
-        Ok((runtime.profile.clone(), runtime.password.clone()))
+        Ok((runtime.profile.clone(), runtime.credential.clone()))
     }
 
     pub fn session_diagnostics(&self, session_id: SessionId) -> Result<String, SessionError> {
@@ -1257,10 +1294,17 @@ fn list_sftp_directory_from_ssh(
     session: &ssh2::Session,
     remote_path: &str,
 ) -> anyhow::Result<RemoteDirectoryListing> {
-    let path = normalize_remote_path(remote_path);
+    let requested_path = normalize_remote_path(remote_path);
     session.set_blocking(true);
     let result: anyhow::Result<RemoteDirectoryListing> = (|| {
         let sftp = session.sftp()?;
+        let path = if requested_path == "." {
+            sftp.realpath(Path::new("."))?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            requested_path
+        };
         let mut entries = sftp
             .readdir(Path::new(&path))?
             .into_iter()
@@ -2351,9 +2395,9 @@ impl SocketWaiter {
 
 fn establish_ssh_session(
     profile: &SessionProfile,
-    password: &str,
+    credential: &SshCredential,
 ) -> Result<(ssh2::Session, ssh2::Channel, TcpStream), anyhow::Error> {
-    let (session, wait_socket) = establish_authenticated_ssh_session(profile, password)?;
+    let (session, wait_socket) = establish_authenticated_ssh_session(profile, credential)?;
     let mut channel = session.channel_session().map_err(|error| {
         anyhow::anyhow!(
             "SSH channel open failed for {}@{}:{}: {}",
@@ -2390,9 +2434,9 @@ fn establish_ssh_session(
 
 fn establish_ssh_side_session(
     profile: &SessionProfile,
-    password: &str,
+    credential: &SshCredential,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
-    let (session, wait_socket) = establish_authenticated_ssh_session(profile, password)?;
+    let (session, wait_socket) = establish_authenticated_ssh_session(profile, credential)?;
     wait_socket.set_nonblocking(true)?;
     session.set_blocking(true);
     Ok((session, wait_socket))
@@ -2400,8 +2444,14 @@ fn establish_ssh_side_session(
 
 fn establish_authenticated_ssh_session(
     profile: &SessionProfile,
-    password: &str,
+    credential: &SshCredential,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
+    if let SshCredential::PrivateKey { key_path, .. } = credential {
+        if !key_path.is_file() {
+            anyhow::bail!("SSH private key file was not found: {}", key_path.display());
+        }
+    }
+
     let address = format!("{}:{}", profile.host, profile.port);
     let socket_addr = address
         .to_socket_addrs()?
@@ -2434,17 +2484,34 @@ fn establish_authenticated_ssh_session(
     session
         .handshake()
         .map_err(|error| describe_handshake_error_clean(&profile, &error))?;
-    session
-        .userauth_password(&profile.username, &password)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "SSH password authentication failed for {}@{}:{}: {}",
-                profile.username,
-                profile.host,
-                profile.port,
-                error
-            )
-        })?;
+    match credential {
+        SshCredential::Password(password) => session
+            .userauth_password(&profile.username, password)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "SSH password authentication failed for {}@{}:{}: {}",
+                    profile.username,
+                    profile.host,
+                    profile.port,
+                    error
+                )
+            })?,
+        SshCredential::PrivateKey {
+            key_path,
+            passphrase,
+        } => session
+            .userauth_pubkey_file(&profile.username, None, key_path, passphrase.as_deref())
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "SSH private key authentication failed for {}@{}:{} using {}: {}",
+                    profile.username,
+                    profile.host,
+                    profile.port,
+                    key_path.display(),
+                    error
+                )
+            })?,
+    }
     if !session.authenticated() {
         anyhow::bail!("authentication failed");
     }
@@ -2547,5 +2614,45 @@ CPU part    : 0xd03
         assert!(is_channel_request_denied(&denied));
         assert!(!is_channel_request_denied(&pending));
         assert!(is_transient_ssh2_error(&pending));
+    }
+
+    #[test]
+    fn private_key_authentication_rejects_a_missing_key_before_connecting() {
+        let key_path = std::env::temp_dir().join(format!("missing-ssh-key-{}", Uuid::new_v4()));
+        let profile = SessionProfile {
+            id: Uuid::new_v4(),
+            name: "missing-key-test".to_string(),
+            group: None,
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            latency_probe_host: None,
+            latency_probe_port: None,
+            use_terminal_latency_probe: false,
+            operating_system: None,
+            username: "test-user".to_string(),
+            auth_method: AuthMethod::PrivateKey {
+                key_ref: key_path.to_string_lossy().into_owned(),
+                passphrase_ref: None,
+            },
+            host_key_policy: HostKeyPolicy::AcceptNew,
+            tags: Vec::new(),
+            favorite: false,
+            sort_order: 0,
+            jump_host_id: None,
+        };
+        let credential = SshCredential::PrivateKey {
+            key_path: key_path.clone(),
+            passphrase: None,
+        };
+
+        let error = match establish_authenticated_ssh_session(&profile, &credential) {
+            Ok(_) => panic!("a missing private key must not reach SSH authentication"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("private key file was not found"));
+        assert!(error
+            .to_string()
+            .contains(&key_path.to_string_lossy().to_string()));
     }
 }

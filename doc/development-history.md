@@ -2,6 +2,14 @@
 
 本文以 Git 提交记录和实际调试过程为依据，说明当前功能如何演进。未提交的工作会明确标注为工作区状态，不伪造提交号。
 
+## 2026-08-02：`0.1.53` 私钥登录与密钥会话 SFTP
+
+- 阅读 Tabby、electerm、ssh2-rs 和 libssh2 的固定版本实现后，接入本机私钥文件与可选私钥口令认证。
+- Profile 只保存私钥路径；私钥口令复用 AES-256-GCM secret store，私钥正文不进入 SQLite。
+- 交互终端、系统监控和 SFTP side session 复用同一种认证凭据。
+- 将 SFTP 初始目录从硬编码 `/root` 改为服务器解析的当前用户主目录，修复非 root 密钥用户无法读取文件面板的问题。
+- Windows OpenSSH 和 Joyshell 后端均完成真实密钥登录验证；后端同时验证终端、系统监控、用户主目录和根目录 SFTP 读取。
+
 ## 2026-07-22：从原型到真实桌面 SSH
 
 ### `be2cc80` Initial Joyshell desktop implementation

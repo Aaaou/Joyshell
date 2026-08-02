@@ -35,8 +35,9 @@ export function resolveProfileDoubleClickDecision({
 }
 
 export function createBlankProfile(name = "新建服务器", group: string | null = null): SessionProfile {
+  const id = crypto.randomUUID();
   return {
-    id: crypto.randomUUID(),
+    id,
     name,
     group,
     host: "",
@@ -46,6 +47,13 @@ export function createBlankProfile(name = "新建服务器", group: string | nul
     use_terminal_latency_probe: false,
     operating_system: null,
     username: "",
+    auth_method: {
+      Password: {
+        secret_ref: `secret://${id}/password`
+      }
+    },
+    host_key_policy: "AcceptNew",
+    jump_host_id: null,
     tags: [],
     favorite: false,
     sort_order: 0

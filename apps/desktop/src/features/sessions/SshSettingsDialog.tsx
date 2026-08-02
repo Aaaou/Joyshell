@@ -1,7 +1,10 @@
 import { Save, Server, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 import { desktopClient } from "../../platform/desktop-client";
+import type { ProfileSecrets } from "../../platform/runtime-client";
 import type { SessionFolder, SessionProfile } from "../../types";
+
+type SshAuthMethod = "password" | "privateKey" | "agent";
 
 export function SshSettingsDialog({
   profile,
@@ -12,11 +15,23 @@ export function SshSettingsDialog({
   profile: SessionProfile;
   folders: SessionFolder[];
   onClose: () => void;
-  onSave: (profile: SessionProfile, password?: string) => void;
+  onSave: (profile: SessionProfile, secrets?: ProfileSecrets) => void;
 }) {
+  const savedPrivateKey =
+    typeof profile.auth_method === "object" && "PrivateKey" in profile.auth_method
+      ? profile.auth_method.PrivateKey
+      : null;
+  const initialAuthMethod: SshAuthMethod =
+    profile.auth_method === "Agent"
+      ? "agent"
+      : savedPrivateKey
+        ? "privateKey"
+        : "password";
   const [draft, setDraft] = useState(profile);
-  const [authMethod, setAuthMethod] = useState("password");
+  const [authMethod, setAuthMethod] = useState<SshAuthMethod>(initialAuthMethod);
   const [password, setPassword] = useState("");
+  const [privateKeyPath, setPrivateKeyPath] = useState(savedPrivateKey?.key_ref ?? "");
+  const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState("");
   const [tagsText, setTagsText] = useState(profile.tags.join(", "));
   const [error, setError] = useState<string | null>(null);
 
@@ -92,7 +107,10 @@ export function SshSettingsDialog({
               <legend>认证</legend>
               <label>
                 <span>方法:</span>
-                <select value={authMethod} onChange={(event) => setAuthMethod(event.target.value)}>
+                <select
+                  value={authMethod}
+                  onChange={(event) => setAuthMethod(event.target.value as SshAuthMethod)}
+                >
                   <option value="password">密码</option>
                   <option value="privateKey">私钥</option>
                   <option value="agent">Agent</option>
@@ -115,9 +133,41 @@ export function SshSettingsDialog({
               <label className="wide">
                 <span>私钥:</span>
                 <div className="file-input-row">
-                  <input placeholder="私钥认证接口已预留，尚未启用" disabled={authMethod !== "privateKey"} />
-                  <button disabled={authMethod !== "privateKey"}>浏览...</button>
+                  <input
+                    value={privateKeyPath}
+                    onChange={(event) => setPrivateKeyPath(event.target.value)}
+                    placeholder="选择或输入本机私钥文件路径"
+                    disabled={authMethod !== "privateKey"}
+                  />
+                  <button
+                    type="button"
+                    disabled={authMethod !== "privateKey"}
+                    onClick={() => {
+                      void desktopClient.selectPrivateKeyFile()
+                        .then((path) => {
+                          if (path) {
+                            setPrivateKeyPath(path);
+                            setError(null);
+                          }
+                        })
+                        .catch((selectError) => {
+                          setError(selectError instanceof Error ? selectError.message : String(selectError));
+                        });
+                    }}
+                  >
+                    浏览...
+                  </button>
                 </div>
+              </label>
+              <label>
+                <span>密钥口令:</span>
+                <input
+                  type="password"
+                  value={privateKeyPassphrase}
+                  onChange={(event) => setPrivateKeyPassphrase(event.target.value)}
+                  placeholder="未加密私钥可留空"
+                  disabled={authMethod !== "privateKey"}
+                />
               </label>
             </fieldset>
 
@@ -156,10 +206,34 @@ export function SshSettingsDialog({
                 setError("端口必须在 1 到 65535 之间");
                 return;
               }
-              if (authMethod !== "password") {
-                setError("初版后端当前只接入密码认证，请先选择密码方式");
+              if (authMethod === "agent") {
+                setError("SSH Agent 认证尚未接入");
                 return;
               }
+              const cleanPrivateKeyPath = privateKeyPath.trim();
+              if (authMethod === "privateKey" && !cleanPrivateKeyPath) {
+                setError("请选择私钥文件");
+                return;
+              }
+              const existingPassphraseRef =
+                savedPrivateKey?.key_ref === cleanPrivateKeyPath
+                  ? savedPrivateKey.passphrase_ref
+                  : null;
+              const passphraseRef = privateKeyPassphrase
+                ? existingPassphraseRef ?? `secret://${draft.id}/private-key-passphrase`
+                : existingPassphraseRef ?? null;
+              const auth_method: SessionProfile["auth_method"] = authMethod === "privateKey"
+                ? {
+                    PrivateKey: {
+                      key_ref: cleanPrivateKeyPath,
+                      passphrase_ref: passphraseRef
+                    }
+                  }
+                : {
+                    Password: {
+                      secret_ref: `secret://${draft.id}/password`
+                    }
+                  };
               onSave({
                 ...draft,
                 name: draft.name.trim(),
@@ -169,11 +243,17 @@ export function SshSettingsDialog({
                 use_terminal_latency_probe: Boolean(draft.use_terminal_latency_probe),
                 username: draft.username.trim(),
                 group: draft.group?.trim() || null,
+                auth_method,
+                host_key_policy: draft.host_key_policy ?? "AcceptNew",
+                jump_host_id: draft.jump_host_id ?? null,
                 tags: tagsText
                   .split(",")
                   .map((tag) => tag.trim())
                   .filter(Boolean)
-              }, password);
+              }, {
+                password: authMethod === "password" ? password : undefined,
+                privateKeyPassphrase: authMethod === "privateKey" ? privateKeyPassphrase : undefined
+              });
             }}
           >
             <Save size={15} /> 确定

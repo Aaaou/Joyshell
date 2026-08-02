@@ -1,3 +1,8 @@
+export type SessionAuthMethod =
+  | { Password: { secret_ref: string } }
+  | { PrivateKey: { key_ref: string; passphrase_ref?: string | null } }
+  | "Agent";
+
 export type SessionProfile = {
   id: string;
   name: string;
@@ -9,6 +14,9 @@ export type SessionProfile = {
   use_terminal_latency_probe?: boolean;
   operating_system?: string | null;
   username: string;
+  auth_method?: SessionAuthMethod;
+  host_key_policy?: "Strict" | "AcceptNew" | "InsecureAcceptAny";
+  jump_host_id?: string | null;
   tags: string[];
   favorite: boolean;
   sort_order: number;

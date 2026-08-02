@@ -12,6 +12,7 @@
 
 - [Terminal SSH Interaction](components/terminal-ssh-interaction.md)
 - [SSH Health And System Sync](components/ssh-health-and-sync.md)
+- [SSH Private Key Authentication](components/ssh-private-key-authentication.md)
 - [Remote System Monitoring](components/remote-system-monitoring.md)
 
 ## SFTP 与传输

@@ -1127,4 +1127,45 @@ mod tests {
         let _ = fs::remove_file(format!("{}-wal", database_path.display()));
         let _ = fs::remove_file(format!("{}-shm", database_path.display()));
     }
+
+    #[test]
+    fn encrypts_private_key_passphrases_at_rest() {
+        let database_path = std::env::temp_dir().join(format!(
+            "joyshell-private-key-passphrase-{}.db",
+            Uuid::new_v4()
+        ));
+        let repository = ProfileRepository::sqlite(&database_path).expect("open profile database");
+        let secret_ref = "secret://test/private-key-passphrase";
+        let passphrase = "test-private-key-passphrase";
+        let key = [42u8; 32];
+
+        repository
+            .upsert_secret(secret_ref, passphrase, &key)
+            .expect("save private key passphrase");
+        assert_eq!(
+            repository
+                .get_secret(secret_ref, &key)
+                .expect("load private key passphrase")
+                .as_deref(),
+            Some(passphrase)
+        );
+        drop(repository);
+
+        let connection = Connection::open(&database_path).expect("inspect encrypted database");
+        let ciphertext: Vec<u8> = connection
+            .query_row(
+                "select ciphertext from secret_values where secret_ref = ?1",
+                params![secret_ref],
+                |row| row.get(0),
+            )
+            .expect("read encrypted value");
+        assert!(!ciphertext
+            .windows(passphrase.len())
+            .any(|window| window == passphrase.as_bytes()));
+
+        drop(connection);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
 }
