@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AgentToolCallPreview,
   AssistantDefinition,
@@ -127,12 +128,21 @@ export async function writeClipboardText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
-export async function saveProfile(profile: SessionProfile, password?: string): Promise<SessionProfile> {
+export type ProfileSecrets = {
+  password?: string;
+  privateKeyPassphrase?: string;
+};
+
+export async function saveProfile(
+  profile: SessionProfile,
+  secrets: ProfileSecrets = {}
+): Promise<SessionProfile> {
   if (canUseTauri) {
     return invoke("save_profile", {
       payload: {
         profile: toBackendProfile(profile),
-        password: password || null
+        password: secrets.password || null,
+        private_key_passphrase: secrets.privateKeyPassphrase || null
       }
     });
   }
@@ -143,6 +153,18 @@ export async function saveProfile(profile: SessionProfile, password?: string): P
     demoProfiles.push(profile);
   }
   return profile;
+}
+
+export async function selectPrivateKeyFile(): Promise<string | null> {
+  if (!canUseTauri) {
+    return null;
+  }
+  const selected = await openDialog({
+    title: "选择 SSH 私钥",
+    multiple: false,
+    directory: false
+  });
+  return typeof selected === "string" ? selected : null;
 }
 
 export async function saveFolder(folder: SessionFolder): Promise<SessionFolder> {
@@ -236,13 +258,13 @@ export async function saveLayoutSettings(settings: LayoutSettings): Promise<Layo
 function toBackendProfile(profile: SessionProfile) {
   return {
     ...profile,
-    auth_method: {
+    auth_method: profile.auth_method ?? {
       Password: {
         secret_ref: `secret://${profile.id}/password`
       }
     },
-    host_key_policy: "AcceptNew",
-    jump_host_id: null
+    host_key_policy: profile.host_key_policy ?? "AcceptNew",
+    jump_host_id: profile.jump_host_id ?? null
   };
 }
 

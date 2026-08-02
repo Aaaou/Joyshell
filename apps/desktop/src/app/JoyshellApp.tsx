@@ -94,7 +94,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.52";
+const clientBuildLabel = "0.1.53";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -310,7 +310,7 @@ export function App() {
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [latencyStatus, setLatencyStatus] = useState("待连接");
   const [sftpListing, setSftpListing] = useState<RemoteDirectoryListing | null>(null);
-  const [sftpPath, setSftpPath] = useState("/root");
+  const [sftpPath, setSftpPath] = useState(".");
   const [selectedRemotePath, setSelectedRemotePath] = useState<string | null>(null);
   const [sftpBusy, setSftpBusy] = useState(false);
   const [sftpStatus, setSftpStatus] = useState("等待连接");
@@ -1159,7 +1159,10 @@ export function App() {
     if (!activeSession) {
       return;
     }
-    void refreshSftpListing(sftpPath);
+    setSftpListing(null);
+    setSftpPath(".");
+    setSelectedRemotePath(null);
+    void refreshSftpListing(".");
   }, [activeSession?.id]);
 
   useEffect(() => {
@@ -3109,8 +3112,8 @@ export function App() {
             setSettingsOpen(false);
             setEditingProfile(null);
           }}
-          onSave={async (profile, password) => {
-            const saved = await saveProfile(profile, password);
+          onSave={async (profile, secrets) => {
+            const saved = await saveProfile(profile, secrets);
             setProfiles((current) => {
               const exists = current.some((item) => item.id === saved.id);
               return exists

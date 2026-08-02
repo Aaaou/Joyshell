@@ -59,12 +59,12 @@ Joyshell 是一个以 SSH 为核心的跨平台桌面工作区。项目使用 Ta
 
 | 能力 | 当前实现 |
 | --- | --- |
-| **真实 SSH 终端** | Rust `ssh2-rs/libssh2` 后端、PTY、交互式 Shell、xterm.js 渲染和断线反馈。 |
+| **真实 SSH 终端** | Rust `ssh2-rs/libssh2` 后端，支持密码、本机私钥文件和可选私钥口令认证，以及 PTY、交互式 Shell、xterm.js 渲染和断线反馈。 |
 | **多服务器工作区** | 会话分组、搜索、收藏、排序、拖放和多标签；同一服务器可以打开多个相互独立的 Shell。 |
-| **远程文件管理** | SFTP 浏览、上传、下载、删除、重命名、拖放上传、原生文件选择器、任务队列和偏移续传。 |
+| **远程文件管理** | 密码与私钥会话均支持 SFTP 浏览、上传、下载、删除、重命名、拖放上传、原生文件选择器、任务队列和偏移续传。连接后自动从当前远端用户的主目录开始。 |
 | **并发隔离** | 终端、SFTP 与系统监控使用独立连接路径，文件传输不会占用交互式 Shell 的工作通道。 |
 | **主机状态** | CPU、内存、磁盘、网络、负载、进程、运行时间与 SSH 连通状态集中呈现。 |
-| **本地优先** | 服务器、文件夹、命令片段、布局和个性化设置保存在本地 SQLite；密码使用 AES-256-GCM 加密。 |
+| **本地优先** | 服务器、文件夹、命令片段、布局和个性化设置保存在本地 SQLite；密码和私钥口令使用 AES-256-GCM 加密，私钥正文不进入数据库。 |
 | **桌面个性化** | 统一桌面渐变、窗口位置感知、背景图片裁剪、终端背景和启动动画。 |
 | **Agent 基础架构** | 通用大助手与受限小助手模型，预留工具注册、审批权限、记忆、Provider、CLI 与 MCP 边界。 |
 
@@ -171,7 +171,9 @@ pnpm --filter @joyshell/desktop tauri dev
 ```powershell
 pnpm test
 pnpm build
+cargo check --workspace
 cargo test --workspace
+cargo fmt --all -- --check
 pnpm --filter @joyshell/desktop tauri build
 ```
 
@@ -183,7 +185,8 @@ pnpm --filter @joyshell/desktop tauri build
 - [x] SQLite 配置、命令片段和加密密码存储
 - [x] 系统信息、连接健康检查和断线反馈
 - [x] 桌面个性化、统一渐变和背景裁剪
-- [ ] 私钥认证、SSH Agent 与 known_hosts 工作流
+- [x] 私钥文件认证与可选加密口令
+- [ ] SSH Agent 与 known_hosts 工作流
 - [ ] 跳板机、端口转发与本地 Shell
 - [ ] 持久化传输队列与自动重连策略
 - [ ] Agentic Loop、模型 Provider 与审批工作流
@@ -212,6 +215,7 @@ pnpm --filter @joyshell/desktop tauri build
 - [开发历程与问题记录](doc/development-history.md)
 - [前端架构与渐进解耦](doc/components/frontend-decoupling.md)
 - [SSH 健康检测与断线同步](doc/components/ssh-health-and-sync.md)
+- [SSH 私钥认证与密钥会话 SFTP](doc/components/ssh-private-key-authentication.md)
 - [SFTP 与终端并发](doc/components/sftp-terminal-concurrency.md)
 - [图标与字体来源说明](doc/components/icon-assets-attribution.md)
 

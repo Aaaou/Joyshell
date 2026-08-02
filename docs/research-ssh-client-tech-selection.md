@@ -2,7 +2,7 @@
 
 调研日期：2026-07-21
 
-实现更新：2026-07-27。仓库已经采用本文推荐的 `Tauri 2 + React/TypeScript + Rust + xterm.js + SQLite` 路线；SSH/SFTP 后端当前使用 `ssh2-rs/libssh2`。Windows `0.1.52` NSIS/MSI 已构建，macOS/Linux 仍待实机验证。本文其余内容保留为选型背景，不代表所有列出的功能已经实现。
+实现更新：2026-08-02。仓库已经采用本文推荐的 `Tauri 2 + React/TypeScript + Rust + xterm.js + SQLite` 路线；SSH/SFTP 后端当前使用 `ssh2-rs/libssh2`，支持密码和本机私钥文件认证。Windows `0.1.53` NSIS/MSI 已构建并完成密钥会话 SFTP 实机验证，macOS/Linux 仍待实机验证。本文其余内容保留为选型背景，不代表所有列出的功能已经实现。
 
 ### 同一服务器多 Shell 的源码结论
 
