@@ -1,11 +1,22 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SftpProgress } from "../../types";
+import { deleteTransfer, listTransfers, saveTransfer } from "../../platform/runtime-client";
 import { isTransferActive, type TransferStats } from "./transfer-model";
 
 export function useTransferRuntime() {
   const [transfers, setTransfers] = useState<SftpProgress[]>([]);
   const [transferStats, setTransferStats] = useState<Record<string, TransferStats>>({});
   const [cancellingTransfers, setCancellingTransfers] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    let active = true;
+    void listTransfers().then((items) => {
+      if (active && items.length > 0) {
+        setTransfers(items.slice(0, 20));
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   const upsertTransfer = useCallback((progress: SftpProgress, replaceId?: string) => {
     const now = Date.now();
@@ -57,6 +68,7 @@ export function useTransferRuntime() {
       progress,
       ...current.filter((item) => item.id !== progress.id && item.id !== replaceId)
     ].slice(0, 20));
+    void saveTransfer(progress).catch(() => undefined);
     if (!isTransferActive(progress.status)) {
       setCancellingTransfers((current) => {
         if (!current[progress.id]) {
@@ -119,6 +131,7 @@ export function useTransferRuntime() {
       delete next[transferId];
       return next;
     });
+    void deleteTransfer(transferId).catch(() => undefined);
   }, []);
 
   const hasActiveTransfer = useMemo(

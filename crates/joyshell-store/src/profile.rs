@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use joyshell_core::{AuthMethod, HostKeyPolicy, SessionId, SessionProfile};
+use joyshell_core::{AuthMethod, HostKeyPolicy, SessionId, SessionProfile, SftpProgress};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionFolder {
@@ -363,6 +363,47 @@ impl ProfileRepository {
         }
     }
 
+    pub fn upsert_transfer(&self, progress: &SftpProgress) -> rusqlite::Result<()> {
+        let payload = serde_json::to_string(progress).map_err(json_to_sql_error)?;
+        match &self.storage {
+            ProfileStorage::Memory { .. } => Ok(()),
+            ProfileStorage::Sqlite { connection } => {
+                let connection = connection.lock();
+                connection.execute(
+                    "insert into transfer_descriptors (id, profile_id, session_id, payload, updated_at) values (?1, ?2, ?3, ?4, datetime('now')) on conflict(id) do update set profile_id = excluded.profile_id, session_id = excluded.session_id, payload = excluded.payload, updated_at = datetime('now')",
+                    params![progress.id.to_string(), progress.session_id.to_string(), progress.session_id.to_string(), payload],
+                )?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn list_transfers(&self) -> rusqlite::Result<Vec<SftpProgress>> {
+        match &self.storage {
+            ProfileStorage::Memory { .. } => Ok(Vec::new()),
+            ProfileStorage::Sqlite { connection } => {
+                let connection = connection.lock();
+                let mut statement = connection
+                    .prepare("select payload from transfer_descriptors order by updated_at desc")?;
+                let rows = statement.query_map([], |row| {
+                    let payload: String = row.get(0)?;
+                    serde_json::from_str(&payload).map_err(json_from_sql_error)
+                })?;
+                rows.collect()
+            }
+        }
+    }
+
+    pub fn delete_transfer(&self, id: Uuid) -> rusqlite::Result<()> {
+        if let ProfileStorage::Sqlite { connection } = &self.storage {
+            connection.lock().execute(
+                "delete from transfer_descriptors where id = ?1",
+                params![id.to_string()],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn upsert_secret(
         &self,
         secret_ref: &str,
@@ -680,6 +721,14 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             nonce blob not null,
             ciphertext blob not null,
             created_at text not null default (datetime('now')),
+            updated_at text not null default (datetime('now'))
+        );
+
+        create table if not exists transfer_descriptors (
+            id text primary key,
+            profile_id text not null,
+            session_id text not null,
+            payload text not null,
             updated_at text not null default (datetime('now'))
         );
 

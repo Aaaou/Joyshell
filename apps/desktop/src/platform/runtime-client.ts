@@ -146,6 +146,25 @@ export async function removeKnownHost(host: string, port: number): Promise<boole
   return false;
 }
 
+export async function listTransfers(): Promise<SftpProgress[]> {
+  if (canUseTauri) {
+    return invoke("list_transfers");
+  }
+  return [];
+}
+
+export async function saveTransfer(progress: SftpProgress): Promise<void> {
+  if (canUseTauri) {
+    await invoke("save_transfer", { progress });
+  }
+}
+
+export async function deleteTransfer(transferId: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("delete_transfer", { transferId });
+  }
+}
+
 export async function disconnectProfile(sessionId: string): Promise<void> {
   if (canUseTauri) {
     await invoke("disconnect_profile", { sessionId });

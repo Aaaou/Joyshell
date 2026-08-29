@@ -401,6 +401,30 @@ fn remove_known_host(state: State<'_, AppState>, host: String, port: u16) -> Res
 }
 
 #[tauri::command]
+fn list_transfers(state: State<'_, AppState>) -> Result<Vec<SftpProgress>, String> {
+    state
+        .profiles
+        .list_transfers()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_transfer(state: State<'_, AppState>, progress: SftpProgress) -> Result<(), String> {
+    state
+        .profiles
+        .upsert_transfer(&progress)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_transfer(state: State<'_, AppState>, transfer_id: Uuid) -> Result<(), String> {
+    state
+        .profiles
+        .delete_transfer(transfer_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn disconnect_profile(state: State<'_, AppState>, session_id: Uuid) -> Result<(), String> {
     state
         .sessions
@@ -1169,6 +1193,9 @@ pub fn run() {
             accept_known_host,
             list_known_hosts,
             remove_known_host,
+            list_transfers,
+            save_transfer,
+            delete_transfer,
             disconnect_profile,
             write_terminal,
             session_diagnostics,
