@@ -52,7 +52,7 @@ export function createBlankProfile(name = "新建服务器", group: string | nul
         secret_ref: `secret://${id}/password`
       }
     },
-    host_key_policy: "AcceptNew",
+    host_key_policy: "Strict",
     jump_host_id: null,
     tags: [],
     favorite: false,

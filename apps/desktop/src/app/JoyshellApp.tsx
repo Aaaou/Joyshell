@@ -97,7 +97,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.59";
+const clientBuildLabel = "0.1.60";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));

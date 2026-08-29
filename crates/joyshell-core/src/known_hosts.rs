@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +107,16 @@ impl KnownHostsStore {
                 host, entry.key_type, entry.key_base64
             ));
         }
-        std::fs::write(path, text)?;
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = std::fs::File::create(&temp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::rename(&temp_path, path)?;
         Ok(())
     }
 }
