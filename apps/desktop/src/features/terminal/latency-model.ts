@@ -4,6 +4,24 @@ const INTERACTIVE_LATENCY_IDLE_MS = 2500;
 const TERMINAL_OUTPUT_BUSY_MS = 1200;
 const INTERACTIVE_LATENCY_MAX_MS = 5000;
 const INTERACTIVE_LATENCY_SAMPLE_LIMIT = 6;
+export const SSH_HEALTH_FAILURE_LIMIT = 3;
+
+export function advanceSessionHealthFailure(
+  sessionId: string,
+  failuresBySession: Record<string, number>,
+  limit = SSH_HEALTH_FAILURE_LIMIT
+) {
+  const failures = (failuresBySession[sessionId] ?? 0) + 1;
+  failuresBySession[sessionId] = failures;
+  return { failures, shouldDisconnect: failures >= limit };
+}
+
+export function clearSessionHealthFailures(
+  sessionId: string,
+  failuresBySession: Record<string, number>
+) {
+  failuresBySession[sessionId] = 0;
+}
 
 export function resolveLatencyTarget(profile: SessionProfile | undefined) {
   if (!profile?.host || !profile.port) {

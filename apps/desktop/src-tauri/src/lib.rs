@@ -3,7 +3,7 @@ use joyshell_agent::{
 };
 use joyshell_core::{
     AuthMethod, RemoteDirectoryListing, SessionInfo, SessionManager, SessionProfile, SftpProgress,
-    SystemSnapshot,
+    SystemSnapshot, TerminalOutputBatch,
 };
 use joyshell_store::{
     AuditAction, AuditEntry, AuditLog, CommandSnippet, LayoutSettings, MemoryStore,
@@ -18,6 +18,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, RwLock};
+use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
@@ -27,6 +28,15 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[derive(Debug, Clone, Serialize)]
+struct LanDevice {
+    ip: String,
+    mac: String,
+    name: Option<String>,
+    vendor: Option<String>,
+    interface: Option<String>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -377,6 +387,19 @@ fn terminal_output_tail(
 }
 
 #[tauri::command]
+fn terminal_output_batch(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    after_sequence: Option<u64>,
+    max_chunks: Option<usize>,
+) -> Result<TerminalOutputBatch, String> {
+    state
+        .sessions
+        .output_batch(session_id, after_sequence, max_chunks.unwrap_or(200))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn collect_system_snapshot(
     state: State<'_, AppState>,
     session_id: Uuid,
@@ -457,6 +480,217 @@ fn measure_icmp_latency_ms(host: &str) -> Option<f64> {
         String::from_utf8_lossy(&output.stderr)
     );
     parse_ping_latency_ms(&text).or_else(|| Some(started.elapsed().as_secs_f64() * 1000.0))
+}
+
+#[tauri::command]
+async fn scan_lan_devices() -> Result<Vec<LanDevice>, String> {
+    tauri::async_runtime::spawn_blocking(scan_lan_devices_sync)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn scan_lan_devices_sync() -> Result<Vec<LanDevice>, String> {
+    // Prime the ARP cache with a bounded, concurrent /24 sweep so devices that
+    // were not recently contacted are still discoverable (Fing-like behavior).
+    for prefix in local_ipv4_prefixes() {
+        let next = Arc::new(std::sync::atomic::AtomicU16::new(1));
+        let mut workers = Vec::new();
+        for _ in 0..24 {
+            let next = Arc::clone(&next);
+            let prefix = prefix.clone();
+            workers.push(thread::spawn(move || loop {
+                let host = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if host > 254 {
+                    break;
+                }
+                let address = format!("{prefix}.{host}");
+                let _ = if cfg!(target_os = "windows") {
+                    run_probe_command("ping", &["-n", "1", "-w", "120", &address])
+                } else {
+                    run_probe_command("ping", &["-c", "1", "-W", "1", &address])
+                };
+            }));
+        }
+        for worker in workers {
+            let _ = worker.join();
+        }
+    }
+    let output = if cfg!(target_os = "windows") {
+        run_probe_command("arp", &["-a"])
+    } else {
+        run_probe_command("ip", &["neigh"])
+    }
+    .ok_or_else(|| "无法读取系统邻居表".to_string())?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let ip = parts
+            .iter()
+            .copied()
+            .find(|part| part.parse::<std::net::IpAddr>().is_ok());
+        let mac = parts.iter().copied().find(|part| {
+            let normalized = part.replace('-', ":");
+            normalized.split(':').count() == 6
+                && normalized
+                    .split(':')
+                    .all(|chunk| chunk.len() == 2 && chunk.chars().all(|c| c.is_ascii_hexdigit()))
+        });
+        let (Some(ip), Some(mac)) = (ip, mac) else {
+            continue;
+        };
+        if !is_unicast_ipv4(ip) {
+            continue;
+        }
+        if devices.iter().any(|item: &LanDevice| item.ip == ip) {
+            continue;
+        }
+        let mac = mac.replace('-', ":").to_uppercase();
+        let name = if cfg!(target_os = "windows") {
+            parts
+                .iter()
+                .copied()
+                .find(|part| {
+                    part.contains('.')
+                        && !part.parse::<std::net::IpAddr>().is_ok()
+                        && *part != "incomplete"
+                })
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let interface = if cfg!(target_os = "windows") {
+            None
+        } else {
+            parts
+                .iter()
+                .position(|part| *part == "dev")
+                .and_then(|index| parts.get(index + 1))
+                .map(|value| value.to_string())
+        };
+        let vendor = mac_vendor(&mac);
+        devices.push(LanDevice {
+            ip: ip.to_string(),
+            mac,
+            name,
+            vendor,
+            interface,
+        });
+    }
+    for ip in local_ipv4_addresses() {
+        if is_unicast_ipv4(&ip) && !devices.iter().any(|item| item.ip == ip) {
+            devices.push(LanDevice {
+                ip,
+                mac: "本机".to_string(),
+                name: Some("本机".to_string()),
+                vendor: Some("本机设备".to_string()),
+                interface: None,
+            });
+        }
+    }
+    devices.sort_by_key(|device| {
+        device
+            .ip
+            .split('.')
+            .map(|part| part.parse::<u16>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    });
+    Ok(devices)
+}
+
+fn is_unicast_ipv4(value: &str) -> bool {
+    let Ok(std::net::IpAddr::V4(address)) = value.parse() else {
+        return false;
+    };
+    let octets = address.octets();
+    octets[0] > 0
+        && octets[0] < 224
+        && octets[0] != 127
+        && octets[3] != 255
+        && !(octets[0] == 169 && octets[1] == 254)
+}
+
+fn mac_vendor(mac: &str) -> Option<String> {
+    let prefix = mac.replace(':', "").replace('-', "").to_uppercase();
+    let vendor = match &prefix[..prefix.len().min(6)] {
+        "B827EB" | "DCA632" | "E45F01" => "Raspberry Pi Foundation",
+        "D83ADD" | "A85E45" => "Rockchip / 瑞芯微",
+        "B40421" => "ZTE / 中兴（路由器/网络设备）",
+        "10B41D" => "Espressif / 乐鑫（物联网设备）",
+        "B88880" => "Xiaomi / Imilab（摄像头/智能设备）",
+        "F4F5D8" | "7C1E52" => "Xiaomi / 小米",
+        "001E06" | "3C5A37" => "ASUSTek",
+        "B4B024" | "ACBC32" => "Samsung",
+        "3C22FB" | "F0D2F1" => "Apple",
+        "3C5AB4" | "A4C361" => "Intel",
+        "00155D" | "002590" => "Dell",
+        "B827C5" | "ECFA5C" => "Lenovo",
+        "0024E4" | "D850E6" => "Huawei",
+        "001A11" | "001C42" => "TP-Link",
+        "000C29" | "005056" => "VMware（虚拟机）",
+        "001C14" | "F8E43B" => "Google",
+        _ => {
+            if prefix.len() >= 2 {
+                let first = u8::from_str_radix(&prefix[0..2], 16).ok()?;
+                if first & 0x02 != 0 {
+                    return Some("随机 MAC（类型待确认）".to_string());
+                }
+            }
+            return None;
+        }
+    };
+    Some(vendor.to_string())
+}
+
+fn local_ipv4_prefixes() -> Vec<String> {
+    let output = if cfg!(target_os = "windows") {
+        run_probe_command("ipconfig", &[])
+    } else {
+        run_probe_command("ip", &["-4", "addr"])
+    };
+    let Some(output) = output else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut prefixes = Vec::new();
+    for token in text.split_whitespace() {
+        let candidate = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
+        let octets: Vec<&str> = candidate.split('.').collect();
+        if octets.len() != 4 || octets.iter().any(|octet| octet.parse::<u8>().is_err()) {
+            continue;
+        }
+        if candidate.starts_with("127.") || candidate.starts_with("169.254.") {
+            continue;
+        }
+        let prefix = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    prefixes
+}
+
+fn local_ipv4_addresses() -> Vec<String> {
+    let output = if cfg!(target_os = "windows") {
+        run_probe_command("ipconfig", &[])
+    } else {
+        run_probe_command("ip", &["-4", "addr"])
+    };
+    let Some(output) = output else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .filter_map(|token| {
+            let candidate = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
+            (candidate.parse::<std::net::Ipv4Addr>().is_ok()).then(|| candidate.to_string())
+        })
+        .filter(|ip| is_unicast_ipv4(ip))
+        .collect()
 }
 
 fn run_probe_command(program: &str, args: &[&str]) -> Option<Output> {
@@ -784,8 +1018,14 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let mut events = sessions.subscribe();
             tauri::async_runtime::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    let _ = app_handle.emit("session:event", event);
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            let _ = app_handle.emit("session:event", event);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
             Ok(())
@@ -807,9 +1047,11 @@ pub fn run() {
             write_terminal,
             session_diagnostics,
             terminal_output_tail,
+            terminal_output_batch,
             collect_system_snapshot,
             measure_latency,
             measure_session_latency,
+            scan_lan_devices,
             sftp_list_directory,
             sftp_create_dir,
             sftp_delete_path,

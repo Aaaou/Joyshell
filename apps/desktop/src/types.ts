@@ -74,6 +74,20 @@ export type SessionInfo = {
   last_seen_at: string;
 };
 
+export type TerminalOutput = {
+  session_id: string;
+  data: string;
+  sequence: number;
+};
+
+export type TerminalOutputBatch = {
+  session_id: string;
+  first_sequence?: number | null;
+  latest_sequence: number;
+  truncated: boolean;
+  outputs: TerminalOutput[];
+};
+
 export type AssistantDefinition = {
   kind: string;
   display_name: string;
@@ -146,6 +160,15 @@ export type SftpProgress = {
   bytes_done: number;
   bytes_total?: number | null;
   status: TransferStatus;
+};
+
+export type LanDevice = {
+  ip: string;
+  mac: string;
+  name?: string | null;
+  vendor?: string | null;
+  online?: boolean;
+  interface?: string | null;
 };
 
 export type LoadAverage = {

@@ -53,7 +53,9 @@ import type {
   SessionFolder,
   SessionProfile,
   SftpProgress,
-  SystemSnapshot
+  SystemSnapshot,
+  TerminalOutput,
+  LanDevice
 } from "../types";
 import { desktopClient, isDesktopRuntime } from "../platform/desktop-client";
 import { useSessionEvents } from "../platform/use-session-events";
@@ -94,7 +96,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.53";
+const clientBuildLabel = "0.1.56";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -102,6 +104,18 @@ function clampNumber(value: number, min: number, max: number) {
 
 function escapeCssUrl(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function deviceTypeFromMac(mac: string) {
+  const prefix = mac.replace(/[-:]/g, "").slice(0, 6).toUpperCase();
+  const known: Record<string, string> = {
+    "B827EB": "Raspberry Pi（推测）",
+    "DCA632": "Raspberry Pi（推测）",
+    "E45F01": "Raspberry Pi（推测）",
+    "D83ADD": "Rockchip / 瑞芯微设备（推测）",
+    "A85E45": "Rockchip / 瑞芯微设备（推测）"
+  };
+  return known[prefix] ?? null;
 }
 
 async function readImageFileAsDataUrl(file: File) {
@@ -238,12 +252,13 @@ const {
   sftpListDirectory,
   sftpRenamePath,
   sftpUploadFile,
-  terminalOutputTail,
+  terminalOutputBatch,
   writeTerminal
 } = desktopClient;
 import {
+  advanceSessionHealthFailure,
   averageLatencySamples,
-  isLoopbackLatencyHost,
+  clearSessionHealthFailures,
   recordInteractiveLatencySample,
   resolveLatencyTarget,
   shouldSkipActiveLatencyProbe
@@ -314,6 +329,15 @@ export function App() {
   const [selectedRemotePath, setSelectedRemotePath] = useState<string | null>(null);
   const [sftpBusy, setSftpBusy] = useState(false);
   const [sftpStatus, setSftpStatus] = useState("等待连接");
+  const [lanDevices, setLanDevices] = useState<LanDevice[]>(() => {
+    try { return JSON.parse(localStorage.getItem("joyshell.lan.devices") || "[]") as LanDevice[]; } catch { return []; }
+  });
+  const [lanScanning, setLanScanning] = useState(false);
+  const [lanToolsOpen, setLanToolsOpen] = useState(false);
+  const [lanScanRequested, setLanScanRequested] = useState(false);
+  const [lanScanOpen, setLanScanOpen] = useState(false);
+  const [selectedLanDevice, setSelectedLanDevice] = useState<LanDevice | null>(null);
+  const scanLanDevices = desktopClient.scanLanDevices;
   const transferRuntime = useTransferRuntime();
   const { transfers, transferStats, cancellingTransfers, hasActiveTransfer } = transferRuntime.state;
   const { markTransferFailed, removeTransfer: removeTransferRecord, setCancellingTransfers, upsertTransfer } = transferRuntime.actions;
@@ -367,6 +391,7 @@ export function App() {
     terminalRef,
     terminalMirrorRef,
     terminalCacheRef,
+    terminalSequenceRef,
     terminalDisconnectNoticeRef,
     lastTerminalInputAtRef,
     lastTerminalOutputAtRef,
@@ -377,8 +402,10 @@ export function App() {
     appendSessionStateNotice: appendTerminalSessionStateNotice,
     appendTerminalOutput: appendTerminalRuntimeOutput,
     clearTerminalCache,
+    consumeTerminalOutput: consumeTerminalRuntimeOutput,
     replaceTerminalOutput: replaceTerminalRuntimeOutput,
-    syncTerminalTail: syncTerminalRuntimeTail
+    resetTerminalOutputCursor: resetTerminalRuntimeOutputCursor,
+    syncTerminalOutputBatch: syncTerminalRuntimeOutputBatch
   } = terminalRuntime.actions;
   const replaceTerminalOutput = useCallback(
     (data: string, profileId?: string | null) => replaceTerminalRuntimeOutput(data, activeProfileIdRef.current, profileId),
@@ -392,9 +419,13 @@ export function App() {
     (sessionId: string, state: SessionInfo["state"]) => appendTerminalSessionStateNotice(sessionId, state, activeProfileIdRef.current),
     [appendTerminalSessionStateNotice]
   );
-  const syncTerminalTail = useCallback(
-    (tail: string, profileId?: string | null) => syncTerminalRuntimeTail(tail, activeProfileIdRef.current, profileId),
-    [syncTerminalRuntimeTail]
+  const consumeTerminalOutput = useCallback(
+    (output: TerminalOutput) => consumeTerminalRuntimeOutput(output, activeProfileIdRef.current),
+    [consumeTerminalRuntimeOutput]
+  );
+  const syncTerminalOutputBatch = useCallback(
+    (batch: Awaited<ReturnType<typeof terminalOutputBatch>>) => syncTerminalRuntimeOutputBatch(batch, activeProfileIdRef.current),
+    [syncTerminalRuntimeOutputBatch]
   );
 
   const markSessionDisconnected = useCallback((sessionId: string, reason: string) => {
@@ -410,10 +441,39 @@ export function App() {
     appendSessionStateNotice(sessionId, state);
   }, [appendSessionStateNotice]);
 
+  const recordSessionHealthFailure = useCallback((sessionId: string) => {
+    const decision = advanceSessionHealthFailure(sessionId, latencyTimeoutCountRef.current);
+    if (!decision.shouldDisconnect) {
+      setLatencyMs(null);
+      setLatencyStatus(`确认中 ${decision.failures}/3`);
+      return;
+    }
+    markSessionDisconnected(sessionId, "SSH connection timed out.");
+    void disconnectProfile(sessionId).catch(() => undefined);
+  }, [markSessionDisconnected]);
+
   useChromeGradient(layoutSettings.chrome_gradient_preset);
 
   const { splashVisible, splashClosing } = useSplashLifecycle();
   const transferClockNow = useTransferClock(hasActiveTransfer);
+
+  const refreshLanDevices = useCallback(async () => {
+    setLanScanning(true);
+    try {
+      const current = (await scanLanDevices()).map((device) => ({ ...device, online: true }));
+      setLanDevices((previous) => {
+        const byMac = new Map(previous.map((device) => [device.mac, device]));
+        current.forEach((device) => byMac.set(device.mac, { ...byMac.get(device.mac), ...device }));
+        const merged = Array.from(byMac.values()).map((device) => ({ ...device, online: current.some((item) => item.mac === device.mac) }));
+        localStorage.setItem("joyshell.lan.devices", JSON.stringify(merged));
+        return merged;
+      });
+    } catch (error) {
+      flash(`扫描失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setLanScanning(false);
+    }
+  }, [flash, scanLanDevices]);
 
   useEffect(() => {
     void Promise.all([
@@ -460,9 +520,10 @@ export function App() {
     appendSessionStateNotice(sessionId, state);
   }, [appendSessionStateNotice]);
 
-  const handleTerminalOutput = useCallback((sessionId: string, data: string) => {
-    appendTerminalOutput(data, sessionId);
-  }, [appendTerminalOutput]);
+  const handleTerminalOutput = useCallback((output: TerminalOutput) => {
+    clearSessionHealthFailures(output.session_id, latencyTimeoutCountRef.current);
+    consumeTerminalOutput(output);
+  }, [consumeTerminalOutput]);
 
   useSessionEvents({
     onStateChanged: handleSessionStateChanged,
@@ -663,24 +724,31 @@ export function App() {
     }
 
     let cancelled = false;
-    void terminalOutputTail(activeSession.id).then((tail) => {
-      if (!cancelled) {
-        syncTerminalTail(tail, activeSession.id);
-      }
-    }).catch(() => {});
-    const timer = window.setInterval(() => {
-      void terminalOutputTail(activeSession.id).then((tail) => {
+    let timer: number | undefined;
+    const pollTerminalTail = async () => {
+      try {
+        const sequence = terminalSequenceRef.current[activeSession.id];
+        const batch = await terminalOutputBatch(activeSession.id, sequence ?? null);
         if (!cancelled) {
-          syncTerminalTail(tail, activeSession.id);
+          syncTerminalOutputBatch(batch);
         }
-      }).catch(() => {});
-    }, 500);
+      } catch {
+        // Live terminal events remain the primary output path.
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(() => void pollTerminalTail(), 500);
+        }
+      }
+    };
+    void pollTerminalTail();
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [activeSession?.id, syncTerminalTail]);
+  }, [activeSession?.id, syncTerminalOutputBatch]);
 
   useEffect(() => {
     const target = activeSession ? resolveLatencyTarget(activeProfile) : null;
@@ -703,7 +771,7 @@ export function App() {
     }
 
     let cancelled = false;
-    const shouldVerifySshLatency = isLoopbackLatencyHost(target.host);
+    let refreshInFlight = false;
     const confirmSessionReachable = async (sessionId: string) => {
       setLatencyMs(null);
       setLatencyStatus("确认中");
@@ -724,67 +792,58 @@ export function App() {
       }
     };
 
-    const failTimedOutSession = (sessionId: string) => {
-      const reason = "SSH connection timed out.";
-      markSessionDisconnected(sessionId, reason);
-      void disconnectProfile(sessionId).catch(() => undefined);
-    };
-
     const refreshLatency = async () => {
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
       const sessionId = activeSession.id;
-      if (sessionId && activeProfile?.use_terminal_latency_probe) {
+      try {
         if (shouldSkipActiveLatencyProbe(sessionId, Date.now(), {
           lastInputAt: lastTerminalInputAtRef.current,
           lastOutputAt: lastTerminalOutputAtRef.current,
           pendingInputAt: pendingInteractiveLatencyRef.current
         })) {
+          if (interactiveLatencySamplesRef.current[sessionId]?.length) {
+            setLatencyMs(averageLatencySamples(interactiveLatencySamplesRef.current[sessionId]));
+            setLatencyStatus("交互平均");
+          }
           return;
         }
-        if (interactiveLatencySamplesRef.current[sessionId]?.length) {
-          setLatencyMs(averageLatencySamples(interactiveLatencySamplesRef.current[sessionId]));
-          setLatencyStatus("交互平均");
+
+        if (terminalDisconnectNoticeRef.current[sessionId]) {
+          setLatencyMs(null);
+          setLatencyStatus("断开");
+          return;
         }
+
         setLatencyStatus("测量中");
-        const reachable = await confirmSessionReachable(sessionId);
-        if (!cancelled && !reachable) {
-          failTimedOutSession(sessionId);
+        let tcpLatency: number | null = null;
+        if (!activeProfile?.use_terminal_latency_probe) {
+          try {
+            tcpLatency = await measureLatency(target.host, target.port, false);
+          } catch {
+            tcpLatency = null;
+          }
         }
-        return;
-      }
-
-      if (terminalDisconnectNoticeRef.current[sessionId]) {
-        setLatencyMs(null);
-        setLatencyStatus("断开");
-        return;
-      }
-
-      setLatencyStatus("测量中");
-      try {
-        const value = await measureLatency(
-          target.host,
-          target.port,
-            false
-          );
         if (cancelled) {
           return;
         }
-        if (value === null || shouldVerifySshLatency) {
-          const reachable = await confirmSessionReachable(sessionId);
-          if (!cancelled && !reachable) {
-            failTimedOutSession(sessionId);
-          }
+
+        const reachable = await confirmSessionReachable(sessionId);
+        if (cancelled) {
           return;
         }
-        setLatencyMs(value);
-        setLatencyStatus("已同步");
-        latencyTimeoutCountRef.current[sessionId] = 0;
-      } catch {
-        if (!cancelled) {
-          const reachable = await confirmSessionReachable(sessionId);
-          if (!cancelled && !reachable) {
-            failTimedOutSession(sessionId);
-          }
+        if (!reachable) {
+          recordSessionHealthFailure(sessionId);
+          return;
         }
+        if (tcpLatency !== null && !activeProfile?.use_terminal_latency_probe) {
+          setLatencyMs(tcpLatency);
+          setLatencyStatus("TCP RTT");
+        }
+      } finally {
+        refreshInFlight = false;
       }
     };
 
@@ -804,7 +863,7 @@ export function App() {
     activeProfileId,
     activeSession?.id,
     activeSession?.state,
-    markSessionDisconnected
+    recordSessionHealthFailure
   ]);
 
   const openShellProfile = useCallback((profileId: string, forceNew = false) => {
@@ -1119,18 +1178,18 @@ export function App() {
         const sessionId = activeSession.id;
         void measureSessionLatency(sessionId).then((value) => {
           if (value === null) {
-            markSessionDisconnected(sessionId, "SSH connection timed out.");
-            void disconnectProfile(sessionId).catch(() => undefined);
+            recordSessionHealthFailure(sessionId);
+          } else {
+            latencyTimeoutCountRef.current[sessionId] = 0;
           }
         }).catch(() => {
-          markSessionDisconnected(sessionId, "SSH connection timed out.");
-          void disconnectProfile(sessionId).catch(() => undefined);
+          recordSessionHealthFailure(sessionId);
         });
       }
     } finally {
       systemSyncInFlightRef.current = false;
     }
-  }, [activeSession, markSessionDisconnected]);
+  }, [activeSession, recordSessionHealthFailure]);
 
   const refreshSftpListing = useCallback(async (path = sftpPath) => {
     if (!activeSession) {
@@ -1191,6 +1250,7 @@ export function App() {
     setOpenProfileIds((current) => current.includes(shellId) ? current : [...current, shellId]);
     setActiveProfileId(shellId);
     setConnecting(true);
+    resetTerminalRuntimeOutputCursor(shellId);
     replaceTerminalOutput(buildConnectingTerminalSeed(profile), shellId);
 
     try {
@@ -1199,10 +1259,8 @@ export function App() {
         session,
         ...current.filter((item) => item.id !== session.id)
       ]);
-      const tail = await terminalOutputTail(session.id);
-      if (tail.trim()) {
-        replaceTerminalOutput(tail, session.id);
-      }
+      const batch = await terminalOutputBatch(session.id, null);
+      syncTerminalOutputBatch(batch);
       window.setTimeout(() => terminalRef.current?.focus(), 0);
       flash(`已连接 ${session.profile_name}`);
     } catch (error) {
@@ -1213,7 +1271,7 @@ export function App() {
     } finally {
       setConnecting(false);
     }
-  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput]);
+  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput, resetTerminalRuntimeOutputCursor, syncTerminalOutputBatch]);
 
   const handleProfileDoubleClick = useCallback(async (profile: SessionProfile) => {
     const decision = resolveProfileDoubleClickDecision({
@@ -2876,6 +2934,44 @@ export function App() {
                 </div>
               );
             })}
+          </section>
+
+          <section className="panel lan-device-panel">
+            <button className="tool-folder" onClick={() => setLanToolsOpen((open) => !open)} aria-expanded={lanToolsOpen}>
+              <FolderOpen size={17} />
+              <strong>网络工具</strong>
+              <ChevronRight size={14} className={lanToolsOpen ? "tool-folder-chevron open" : "tool-folder-chevron"} />
+            </button>
+            {lanToolsOpen ? <div className="tool-folder-content">
+              <button className="tool-entry" onClick={() => { setLanScanOpen((open) => !open); if (!lanScanRequested) { setLanScanRequested(true); void refreshLanDevices(); } }} disabled={lanScanning} aria-expanded={lanScanOpen}>
+                <Network size={15} />
+                <span><strong>内网设备扫描</strong><small>发现 IP、MAC 和设备类型</small></span>
+                {lanScanning ? <RefreshCw size={14} className="spin" /> : <ChevronRight size={14} className={lanScanOpen ? "tool-folder-chevron open" : ""} />}
+              </button>
+              {lanScanRequested && lanScanOpen ? <div className="lan-device-results">
+              <div className="lan-results-heading"><span>扫描结果 · {lanDevices.filter((device) => device.online !== false).length}/{lanDevices.length} 台在线</span><button className="panel-heading-action" onClick={() => { void refreshLanDevices(); }} disabled={lanScanning} title="刷新设备"><RefreshCw size={14} className={lanScanning ? "spin" : ""} /></button></div>
+              {selectedLanDevice ? <div className="lan-device-detail">
+                <div className="lan-detail-heading"><button className="lan-back-button" onClick={() => setSelectedLanDevice(null)}>‹ 设备列表</button><strong>设备详情</strong><span /></div>
+                <dl>
+                  <dt>设备 ID / 名称</dt><dd>{selectedLanDevice.name || "未提供"}</dd>
+                  <dt>IP 地址</dt><dd>{selectedLanDevice.ip}</dd>
+                  <dt>MAC 地址</dt><dd>{selectedLanDevice.mac}</dd>
+                  <dt>厂商 / 类型</dt><dd>{selectedLanDevice.vendor || deviceTypeFromMac(selectedLanDevice.mac) || "未识别"}</dd>
+                  <dt>状态</dt><dd>{selectedLanDevice.online === false ? "离线" : "在线"}</dd>
+                  <dt>网卡接口</dt><dd>{selectedLanDevice.interface || "未提供"}</dd>
+                </dl>
+              </div> : lanDevices.length === 0 ? <p className="muted">暂未发现设备。</p> : (
+              <div className="lan-device-list">
+                {lanDevices.map((device) => (
+                  <button className="lan-device-row" key={`${device.ip}-${device.mac}`} onClick={() => setSelectedLanDevice(device)}>
+                    <div className="lan-device-main"><strong>{device.name || device.vendor || deviceTypeFromMac(device.mac) || `设备 ${device.ip.split(".").at(-1) ?? ""}`}</strong><span>{device.ip}{device.vendor && device.name ? ` · ${device.vendor}` : ""}{device.interface ? ` · ${device.interface}` : ""} · {device.online === false ? "离线" : "在线"}</span></div>
+                    <small>{device.mac}</small>
+                  </button>
+                ))}
+              </div>
+              )}
+            </div> : null}
+            </div> : null}
           </section>
 
           <section className="panel assistant-research-panel">

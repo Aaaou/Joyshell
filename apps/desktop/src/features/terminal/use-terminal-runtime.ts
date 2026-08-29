@@ -1,7 +1,8 @@
 import type { JoyTerminalHandle } from "@joyshell/terminal";
 import { useCallback, useRef, useState } from "react";
-import type { SessionInfo } from "../../types";
+import type { SessionInfo, TerminalOutput, TerminalOutputBatch } from "../../types";
 import { trimTerminalCache } from "./terminal-model";
+import { resolveTerminalBatch, resolveTerminalEvent } from "./terminal-output-sequence";
 
 type TerminalRuntimeOptions = {
   initialOutput: string;
@@ -24,6 +25,7 @@ export function useTerminalRuntime({
   const terminalRef = useRef<JoyTerminalHandle | null>(null);
   const terminalMirrorRef = useRef(initialOutput);
   const terminalCacheRef = useRef<Record<string, string>>({ empty: initialOutput });
+  const terminalSequenceRef = useRef<Record<string, number>>({});
   const terminalDisconnectNoticeRef = useRef<Record<string, string>>({});
   const lastTerminalInputAtRef = useRef<Record<string, number>>({});
   const lastTerminalOutputAtRef = useRef<Record<string, number>>({});
@@ -76,21 +78,40 @@ export function useTerminalRuntime({
     appendTerminalOutput(notice, activeProfileId, sessionId);
   }, [appendTerminalOutput, disconnectedReason, isConnected]);
 
-  const syncTerminalTail = useCallback((tail: string, activeProfileId: string | null, profileId?: string | null) => {
-    const cacheKey = profileId ?? activeProfileId ?? "empty";
-    const current = terminalCacheRef.current[cacheKey] ?? "";
-    if (!tail || tail === current) {
+  const consumeTerminalOutput = useCallback((output: TerminalOutput, activeProfileId: string | null) => {
+    const decision = resolveTerminalEvent(terminalSequenceRef.current[output.session_id], output);
+    if (!decision) {
+      return false;
+    }
+    terminalSequenceRef.current[output.session_id] = decision.cursor;
+    appendTerminalOutput(decision.data, activeProfileId, output.session_id);
+    return true;
+  }, [appendTerminalOutput]);
+
+  const syncTerminalOutputBatch = useCallback((batch: TerminalOutputBatch, activeProfileId: string | null) => {
+    const cacheKey = batch.session_id;
+    const decision = resolveTerminalBatch(terminalSequenceRef.current[cacheKey], batch);
+    terminalSequenceRef.current[cacheKey] = decision.cursor;
+    if (decision.truncated) {
+      appendTerminalOutput("\r\n[terminal output truncated while the UI was busy]\r\n", activeProfileId, cacheKey);
+    }
+    if (!decision.data) {
       return;
     }
-    if (tail.startsWith(current)) {
-      appendTerminalOutput(tail.slice(current.length), activeProfileId, cacheKey);
-      return;
+    if (decision.initialize) {
+      replaceTerminalOutput(decision.data, activeProfileId, cacheKey);
+    } else {
+      appendTerminalOutput(decision.data, activeProfileId, cacheKey);
     }
-    replaceTerminalOutput(tail, activeProfileId, cacheKey);
   }, [appendTerminalOutput, replaceTerminalOutput]);
+
+  const resetTerminalOutputCursor = useCallback((profileId: string) => {
+    delete terminalSequenceRef.current[profileId];
+  }, []);
 
   const clearTerminalCache = useCallback((profileId: string) => {
     terminalCacheRef.current[profileId] = "";
+    delete terminalSequenceRef.current[profileId];
     delete terminalDisconnectNoticeRef.current[profileId];
     delete lastTerminalInputAtRef.current[profileId];
     delete lastTerminalOutputAtRef.current[profileId];
@@ -104,6 +125,7 @@ export function useTerminalRuntime({
       terminalRef,
       terminalMirrorRef,
       terminalCacheRef,
+      terminalSequenceRef,
       terminalDisconnectNoticeRef,
       lastTerminalInputAtRef,
       lastTerminalOutputAtRef,
@@ -114,8 +136,10 @@ export function useTerminalRuntime({
       appendSessionStateNotice,
       appendTerminalOutput,
       clearTerminalCache,
+      consumeTerminalOutput,
       replaceTerminalOutput,
-      syncTerminalTail
+      resetTerminalOutputCursor,
+      syncTerminalOutputBatch
     }
   };
 }

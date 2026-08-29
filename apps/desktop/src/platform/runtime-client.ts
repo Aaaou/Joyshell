@@ -11,7 +11,9 @@ import type {
   SessionFolder,
   SessionProfile,
   SftpProgress,
-  SystemSnapshot
+  LanDevice,
+  SystemSnapshot,
+  TerminalOutputBatch
 } from "../types";
 
 const canUseTauri = "__TAURI_INTERNALS__" in window;
@@ -98,6 +100,16 @@ export async function listProfiles(): Promise<SessionProfile[]> {
     return invoke("list_profiles");
   }
   return demoProfiles;
+}
+
+export async function scanLanDevices(): Promise<LanDevice[]> {
+  if (canUseTauri) {
+    return invoke("scan_lan_devices");
+  }
+  return [
+    { ip: "192.168.1.1", mac: "A4:5E:60:12:34:56", name: "路由器", vendor: "TP-Link", interface: "Wi-Fi" },
+    { ip: "192.168.1.23", mac: "B8:27:EB:78:9A:BC", name: "开发机", vendor: "Raspberry Pi Foundation", interface: "Wi-Fi" }
+  ];
 }
 
 export async function listFolders(): Promise<SessionFolder[]> {
@@ -281,6 +293,23 @@ export async function terminalOutputTail(sessionId: string, maxChunks = 200): Pr
     return invoke("terminal_output_tail", { sessionId, maxChunks });
   }
   return "";
+}
+
+export async function terminalOutputBatch(
+  sessionId: string,
+  afterSequence: number | null,
+  maxChunks = 200
+): Promise<TerminalOutputBatch> {
+  if (canUseTauri) {
+    return invoke("terminal_output_batch", { sessionId, afterSequence, maxChunks });
+  }
+  return {
+    session_id: sessionId,
+    first_sequence: null,
+    latest_sequence: afterSequence ?? 0,
+    truncated: false,
+    outputs: []
+  };
 }
 
 export async function sessionDiagnostics(sessionId: string): Promise<string> {

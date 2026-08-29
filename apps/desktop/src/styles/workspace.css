@@ -1581,3 +1581,35 @@ html.bottom-panel-resizing * {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.lan-device-panel { margin-top: 10px; }
+.tool-folder { display: flex; align-items: center; width: 100%; gap: 8px; padding: 6px 4px; border: 0; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.tool-folder:hover { color: var(--accent); }
+.tool-folder-chevron { margin-left: auto; transition: transform .18s ease; }
+.tool-folder-chevron.open { transform: rotate(90deg); }
+.tool-folder-content { padding: 5px 0 2px 8px; }
+.tool-entry { display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); cursor: pointer; text-align: left; }
+.tool-entry:hover { background: var(--surface-hover); }
+.tool-entry:disabled { opacity: .6; cursor: progress; }
+.tool-entry span { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.tool-entry small { color: var(--muted); font-size: 11px; }
+.lan-device-results { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+.lan-results-heading { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.panel-heading-action { margin-left: auto; display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.panel-heading-action:hover { background: var(--surface-hover); color: var(--text); }
+.panel-heading-action:disabled { opacity: .55; cursor: progress; }
+.lan-device-hint { margin: -2px 0 7px; font-size: 11px; }
+.lan-device-list { display: grid; gap: 2px; }
+.lan-device-row { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; padding: 7px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.lan-device-row:hover { background: rgba(255,255,255,.56); }
+.lan-device-main { display: grid; gap: 2px; min-width: 0; }
+.lan-device-main strong, .lan-device-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lan-device-main span, .lan-device-row small { color: var(--muted); font-size: 11px; }
+.lan-device-detail { margin-top: 9px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.lan-detail-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.lan-back-button { border: 0; background: transparent; color: var(--accent); cursor: pointer; padding: 0; font-size: 11px; }
+.lan-device-detail dl { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 5px 8px; margin: 0; font-size: 11px; }
+.lan-device-detail dt { color: var(--muted); }
+.lan-device-detail dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

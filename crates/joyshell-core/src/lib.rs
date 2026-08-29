@@ -12,4 +12,4 @@ pub use sftp::{
     FileTransferDirection, RemoteDirectoryListing, RemoteFileEntry, SftpOperation, SftpProgress,
     TransferStatus,
 };
-pub use terminal::{TerminalInput, TerminalOutput};
+pub use terminal::{TerminalInput, TerminalOutput, TerminalOutputBatch};

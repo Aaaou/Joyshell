@@ -17,7 +17,8 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    FileTransferDirection, RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TransferStatus,
+    FileTransferDirection, RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput,
+    TerminalOutputBatch, TransferStatus,
 };
 
 pub type SessionId = Uuid;
@@ -25,9 +26,10 @@ pub type SessionId = Uuid;
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
 const SSH_OPERATION_TIMEOUT_MS: u32 = 15_000;
 const SSH_HEALTH_INTERVAL_SECS: u64 = 5;
+const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 2;
 const SSH_HEALTH_TIMEOUT_MS: u64 = 3_000;
 const SSH_HEALTH_CACHE_MS: u64 = 2_000;
-const LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED: i32 = -22;
+const SSH_HEALTH_FAILURE_LIMIT: u32 = 3;
 const SYSTEM_SYNC_TIMEOUT_MS: u32 = 8_000;
 const SYSTEM_SYNC_MAX_ATTEMPTS: u32 = 2;
 const SFTP_TRANSFER_TIMEOUT_MS: u32 = 60_000;
@@ -36,6 +38,7 @@ const SFTP_TRANSFER_BACKOFF_MS: u64 = 900;
 const SFTP_TRANSFER_BUFFER_SIZE: usize = 128 * 1024;
 const SFTP_PROGRESS_MIN_INTERVAL_MS: u64 = 120;
 const SFTP_PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
+const TERMINAL_OUTPUT_TAIL_CHUNKS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum HostKeyPolicy {
@@ -232,10 +235,7 @@ pub enum SessionEvent {
         session_id: SessionId,
         state: ConnectionState,
     },
-    TerminalOutput {
-        session_id: SessionId,
-        data: String,
-    },
+    TerminalOutput(TerminalOutput),
     SftpProgress(super::sftp::SftpProgress),
 }
 
@@ -253,7 +253,8 @@ struct SessionRuntime {
     info: SessionInfo,
     profile: SessionProfile,
     credential: SshCredential,
-    output_tail: VecDeque<String>,
+    output_tail: VecDeque<TerminalOutput>,
+    next_output_sequence: u64,
     ssh: Option<SshRuntime>,
     runtime_token: Uuid,
     last_transient_io: Option<String>,
@@ -398,6 +399,7 @@ impl SessionManager {
                 profile: profile.clone(),
                 credential: credential.clone(),
                 output_tail: VecDeque::new(),
+                next_output_sequence: 0,
                 ssh: None,
                 runtime_token: Uuid::new_v4(),
                 last_transient_io: None,
@@ -833,46 +835,57 @@ impl SessionManager {
             .iter()
             .rev()
             .take(max_chunks)
-            .cloned()
+            .map(|output| output.data.clone())
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect())
     }
 
+    pub fn output_batch(
+        &self,
+        session_id: SessionId,
+        after_sequence: Option<u64>,
+        max_chunks: usize,
+    ) -> Result<TerminalOutputBatch, SessionError> {
+        let sessions = self.sessions.read();
+        let runtime = sessions
+            .get(&session_id)
+            .ok_or(SessionError::NotFound(session_id))?;
+        Ok(build_output_batch(
+            runtime,
+            session_id,
+            after_sequence,
+            max_chunks,
+        ))
+    }
+
     fn push_output(&self, session_id: SessionId, data: String) {
-        if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+        let output = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
             runtime.info.last_seen_at = Utc::now();
-            runtime.output_tail.push_back(data.clone());
-            while runtime.output_tail.len() > 200 {
-                runtime.output_tail.pop_front();
-            }
+            Some(store_terminal_output(runtime, session_id, data))
+        } else {
+            None
+        };
+        if let Some(output) = output {
+            let _ = self.events.send(SessionEvent::TerminalOutput(output));
         }
-        let _ = self
-            .events
-            .send(SessionEvent::TerminalOutput { session_id, data });
     }
 
     fn push_output_for_runtime(&self, session_id: SessionId, runtime_token: Uuid, data: String) {
-        let should_emit = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+        let output = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
             if runtime.runtime_token != runtime_token {
-                false
+                None
             } else {
                 runtime.info.last_seen_at = Utc::now();
-                runtime.output_tail.push_back(data.clone());
-                while runtime.output_tail.len() > 200 {
-                    runtime.output_tail.pop_front();
-                }
-                true
+                Some(store_terminal_output(runtime, session_id, data))
             }
         } else {
-            false
+            None
         };
 
-        if should_emit {
-            let _ = self
-                .events
-                .send(SessionEvent::TerminalOutput { session_id, data });
+        if let Some(output) = output {
+            let _ = self.events.send(SessionEvent::TerminalOutput(output));
         }
     }
 
@@ -963,6 +976,61 @@ impl SessionManager {
     }
 }
 
+fn store_terminal_output(
+    runtime: &mut SessionRuntime,
+    session_id: SessionId,
+    data: String,
+) -> TerminalOutput {
+    runtime.next_output_sequence = runtime.next_output_sequence.saturating_add(1);
+    let output = TerminalOutput {
+        session_id,
+        data,
+        sequence: runtime.next_output_sequence,
+    };
+    runtime.output_tail.push_back(output.clone());
+    while runtime.output_tail.len() > TERMINAL_OUTPUT_TAIL_CHUNKS {
+        runtime.output_tail.pop_front();
+    }
+    output
+}
+
+fn build_output_batch(
+    runtime: &SessionRuntime,
+    session_id: SessionId,
+    after_sequence: Option<u64>,
+    max_chunks: usize,
+) -> TerminalOutputBatch {
+    let first_sequence = runtime.output_tail.front().map(|output| output.sequence);
+    let latest_sequence = runtime.next_output_sequence;
+    let truncated = after_sequence
+        .zip(first_sequence)
+        .is_some_and(|(cursor, first)| cursor.saturating_add(1) < first);
+    let available = runtime
+        .output_tail
+        .iter()
+        .filter(|output| after_sequence.is_none_or(|cursor| output.sequence > cursor));
+    let outputs = if after_sequence.is_some() {
+        available.take(max_chunks).cloned().collect()
+    } else {
+        available
+            .rev()
+            .take(max_chunks)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    };
+
+    TerminalOutputBatch {
+        session_id,
+        first_sequence,
+        latest_sequence,
+        truncated,
+        outputs,
+    }
+}
+
 fn run_ssh_session_loop(
     session_id: SessionId,
     runtime_token: Uuid,
@@ -977,6 +1045,7 @@ fn run_ssh_session_loop(
     let mut pending_offset = 0;
     let mut socket_waiter = SocketWaiter::new(wait_socket);
     let mut health_probe: Option<PendingHealthProbe> = None;
+    let mut health_failures = 0;
     let mut next_health_probe_at = Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
 
     loop {
@@ -1000,21 +1069,30 @@ fn run_ssh_session_loop(
             }
         }
 
-        if !drain_channel_output(
+        let Some(bytes_read) = drain_channel_output(
             &session,
             &mut channel,
             &mut buffer,
             session_id,
             runtime_token,
             &manager,
-        ) {
+        ) else {
             return;
+        };
+        if bytes_read > 0 {
+            health_failures = 0;
+            next_health_probe_at = Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
         }
 
         while pending_offset < pending_write.len() {
             match channel.write(&pending_write[pending_offset..]) {
                 Ok(0) => break,
-                Ok(written) => pending_offset += written,
+                Ok(written) => {
+                    pending_offset += written;
+                    health_failures = 0;
+                    next_health_probe_at =
+                        Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
+                }
                 Err(error) if is_transient_ssh_io_error(&error) => {
                     manager.record_transient_io_for_runtime(
                         session_id,
@@ -1063,15 +1141,19 @@ fn run_ssh_session_loop(
             pending_offset = 0;
         }
 
-        if !drain_channel_output(
+        let Some(bytes_read) = drain_channel_output(
             &session,
             &mut channel,
             &mut buffer,
             session_id,
             runtime_token,
             &manager,
-        ) {
+        ) else {
             return;
+        };
+        if bytes_read > 0 {
+            health_failures = 0;
+            next_health_probe_at = Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
         }
 
         if health_probe.is_none() && Instant::now() >= next_health_probe_at {
@@ -1082,9 +1164,10 @@ fn run_ssh_session_loop(
         }
 
         if let Some(probe) = health_probe.as_ref() {
-            match poll_channel_health(&mut channel, probe.started_at) {
+            match poll_session_health(&session, probe.started_at) {
                 HealthProbePoll::Pending => {}
                 HealthProbePoll::Alive(elapsed_ms) => {
+                    health_failures = 0;
                     let completed = health_probe.take().expect("health probe exists");
                     for response in completed.responses {
                         let _ = response.send(Ok(Some(elapsed_ms)));
@@ -1098,12 +1181,17 @@ fn run_ssh_session_loop(
                         Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
                 }
                 HealthProbePoll::Failed(reason) => {
+                    health_failures += 1;
                     let failed = health_probe.take().expect("health probe exists");
                     for response in failed.responses {
                         let _ = response.send(Err(reason.clone()));
                     }
-                    manager.fail_session_for_runtime(session_id, runtime_token, reason);
-                    return;
+                    if health_failures >= SSH_HEALTH_FAILURE_LIMIT {
+                        manager.fail_session_for_runtime(session_id, runtime_token, reason);
+                        return;
+                    }
+                    next_health_probe_at =
+                        Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
                 }
             }
         }
@@ -1119,7 +1207,8 @@ fn drain_channel_output(
     session_id: SessionId,
     runtime_token: Uuid,
     manager: &SessionManager,
-) -> bool {
+) -> Option<usize> {
+    let mut total_read = 0;
     for _ in 0..64 {
         match channel.read(buffer) {
             Ok(0) => {
@@ -1129,11 +1218,12 @@ fn drain_channel_output(
                         runtime_token,
                         "remote shell closed".to_string(),
                     );
-                    return false;
+                    return None;
                 }
-                return true;
+                return Some(total_read);
             }
             Ok(read) => {
+                total_read += read;
                 let data = String::from_utf8_lossy(&buffer[..read]).to_string();
                 manager.push_output_for_runtime(session_id, runtime_token, data);
             }
@@ -1145,7 +1235,7 @@ fn drain_channel_output(
                     &error,
                     session.block_directions(),
                 );
-                return true;
+                return Some(total_read);
             }
             Err(error) => {
                 manager.fail_session_for_runtime(
@@ -1153,21 +1243,18 @@ fn drain_channel_output(
                     runtime_token,
                     format!("terminal read failed: {error}"),
                 );
-                return false;
+                return None;
             }
         }
     }
 
-    true
+    Some(total_read)
 }
 
-fn poll_channel_health(channel: &mut ssh2::Channel, started_at: Instant) -> HealthProbePoll {
+fn poll_session_health(session: &ssh2::Session, started_at: Instant) -> HealthProbePoll {
     let elapsed = started_at.elapsed();
-    match channel.setenv("JOYSHELL_HEALTH_CHECK", "1") {
-        Ok(()) => HealthProbePoll::Alive(elapsed.as_secs_f64() * 1000.0),
-        Err(error) if is_channel_request_denied(&error) => {
-            HealthProbePoll::Alive(elapsed.as_secs_f64() * 1000.0)
-        }
+    match session.keepalive_send() {
+        Ok(_) => HealthProbePoll::Alive(elapsed.as_secs_f64() * 1000.0),
         Err(error) if is_transient_ssh2_error(&error) => {
             if elapsed >= Duration::from_millis(SSH_HEALTH_TIMEOUT_MS) {
                 HealthProbePoll::Failed("SSH connection timed out.".to_string())
@@ -1177,10 +1264,6 @@ fn poll_channel_health(channel: &mut ssh2::Channel, started_at: Instant) -> Heal
         }
         Err(error) => HealthProbePoll::Failed(format!("SSH connection lost: {error}")),
     }
-}
-
-fn is_channel_request_denied(error: &ssh2::Error) -> bool {
-    error.code() == ssh2::ErrorCode::Session(LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED)
 }
 
 fn collect_system_snapshot_from_ssh(
@@ -2515,6 +2598,7 @@ fn establish_authenticated_ssh_session(
     if !session.authenticated() {
         anyhow::bail!("authentication failed");
     }
+    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
 
     Ok((session, wait_socket))
 }
@@ -2583,6 +2667,96 @@ fn is_transient_ssh2_error(error: &ssh2::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn test_session_runtime(session_id: SessionId) -> SessionRuntime {
+        let profile = SessionProfile {
+            id: session_id,
+            name: "sequence-test".to_string(),
+            group: None,
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            latency_probe_host: None,
+            latency_probe_port: None,
+            use_terminal_latency_probe: false,
+            operating_system: None,
+            username: "test-user".to_string(),
+            auth_method: AuthMethod::Password {
+                secret_ref: "test-secret".to_string(),
+            },
+            host_key_policy: HostKeyPolicy::AcceptNew,
+            tags: Vec::new(),
+            favorite: false,
+            sort_order: 0,
+            jump_host_id: None,
+        };
+        SessionRuntime {
+            info: SessionInfo {
+                id: session_id,
+                profile_id: session_id,
+                profile_name: profile.name.clone(),
+                host: profile.host.clone(),
+                port: profile.port,
+                username: profile.username.clone(),
+                state: ConnectionState::Connected,
+                connected_at: Some(Utc::now()),
+                last_seen_at: Utc::now(),
+            },
+            profile,
+            credential: SshCredential::Password("test".to_string()),
+            output_tail: VecDeque::new(),
+            next_output_sequence: 0,
+            ssh: None,
+            runtime_token: Uuid::new_v4(),
+            last_transient_io: None,
+            last_health_rtt_ms: None,
+            last_health_at: None,
+        }
+    }
+
+    #[test]
+    fn terminal_output_batch_tracks_sequences_and_retention() {
+        let session_id = Uuid::new_v4();
+        let mut runtime = test_session_runtime(session_id);
+        for sequence in 1..=205 {
+            let output = store_terminal_output(&mut runtime, session_id, format!("{sequence}\n"));
+            assert_eq!(output.sequence, sequence);
+        }
+
+        let initial = build_output_batch(&runtime, session_id, None, 2);
+        assert_eq!(initial.first_sequence, Some(6));
+        assert_eq!(initial.latest_sequence, 205);
+        assert!(!initial.truncated);
+        assert_eq!(
+            initial
+                .outputs
+                .iter()
+                .map(|output| output.sequence)
+                .collect::<Vec<_>>(),
+            vec![204, 205]
+        );
+
+        let truncated = build_output_batch(&runtime, session_id, Some(3), 200);
+        assert!(truncated.truncated);
+        assert_eq!(
+            truncated.outputs.first().map(|output| output.sequence),
+            Some(6)
+        );
+        assert_eq!(
+            truncated.outputs.last().map(|output| output.sequence),
+            Some(205)
+        );
+
+        let incremental = build_output_batch(&runtime, session_id, Some(203), 200);
+        assert!(!incremental.truncated);
+        assert_eq!(
+            incremental
+                .outputs
+                .iter()
+                .map(|output| output.sequence)
+                .collect::<Vec<_>>(),
+            vec![204, 205]
+        );
+    }
+
     #[test]
     fn maps_arm_cpu_part_to_readable_core_name() {
         let cpuinfo = "\
@@ -2604,15 +2778,9 @@ CPU part    : 0xd03
     }
 
     #[test]
-    fn channel_request_denial_confirms_health_reply() {
-        let denied = ssh2::Error::new(
-            ssh2::ErrorCode::Session(LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED),
-            "request denied",
-        );
+    fn would_block_is_a_transient_ssh_error() {
         let pending = ssh2::Error::new(ssh2::ErrorCode::Session(-37), "would block");
 
-        assert!(is_channel_request_denied(&denied));
-        assert!(!is_channel_request_denied(&pending));
         assert!(is_transient_ssh2_error(&pending));
     }
 

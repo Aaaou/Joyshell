@@ -7,7 +7,7 @@ export function useTransferClock(hasActiveTransfer: boolean) {
     if (!hasActiveTransfer) {
       return;
     }
-    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    const timer = window.setInterval(() => setClockNow(Date.now()), 2500);
     return () => window.clearInterval(timer);
   }, [hasActiveTransfer]);
 
