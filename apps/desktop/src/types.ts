@@ -154,6 +154,7 @@ export type TransferStatus =
 export type SftpProgress = {
   id: string;
   session_id: string;
+  profile_id?: string | null;
   direction: FileTransferDirection;
   local_path: string;
   remote_path: string;

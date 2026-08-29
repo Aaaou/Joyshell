@@ -371,7 +371,7 @@ impl ProfileRepository {
                 let connection = connection.lock();
                 connection.execute(
                     "insert into transfer_descriptors (id, profile_id, session_id, payload, updated_at) values (?1, ?2, ?3, ?4, datetime('now')) on conflict(id) do update set profile_id = excluded.profile_id, session_id = excluded.session_id, payload = excluded.payload, updated_at = datetime('now')",
-                    params![progress.id.to_string(), progress.session_id.to_string(), progress.session_id.to_string(), payload],
+                    params![progress.id.to_string(), progress.profile_id.unwrap_or(progress.session_id).to_string(), progress.session_id.to_string(), payload],
                 )?;
                 Ok(())
             }
@@ -383,11 +383,17 @@ impl ProfileRepository {
             ProfileStorage::Memory { .. } => Ok(Vec::new()),
             ProfileStorage::Sqlite { connection } => {
                 let connection = connection.lock();
-                let mut statement = connection
-                    .prepare("select payload from transfer_descriptors order by updated_at desc")?;
+                let mut statement = connection.prepare(
+                    "select payload, profile_id from transfer_descriptors order by updated_at desc",
+                )?;
                 let rows = statement.query_map([], |row| {
                     let payload: String = row.get(0)?;
-                    serde_json::from_str(&payload).map_err(json_from_sql_error)
+                    let mut progress: SftpProgress =
+                        serde_json::from_str(&payload).map_err(json_from_sql_error)?;
+                    if progress.profile_id.is_none() {
+                        progress.profile_id = Some(parse_uuid(row.get::<_, String>(1)?)?);
+                    }
+                    Ok(progress)
                 })?;
                 rows.collect()
             }

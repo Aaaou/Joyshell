@@ -71,6 +71,8 @@ pub enum SftpOperation {
 pub struct SftpProgress {
     pub id: Uuid,
     pub session_id: SessionId,
+    #[serde(default)]
+    pub profile_id: Option<SessionId>,
     pub direction: FileTransferDirection,
     pub local_path: String,
     pub remote_path: String,

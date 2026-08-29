@@ -97,7 +97,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.64";
+const clientBuildLabel = "0.1.65";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -347,6 +347,7 @@ export function App() {
   const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
   const [textInputDialog, setTextInputDialog] = useState<TextInputDialogState | null>(null);
   const [hostKeyPrompt, setHostKeyPrompt] = useState<{ title: string; message: string } | null>(null);
+  const autoResumedTransferIdsRef = useRef(new Set<string>());
   const hostKeyResolverRef = useRef<((accepted: boolean) => void) | null>(null);
   const requestHostKeyConfirmation = useCallback((title: string, message: string) => new Promise<boolean>((resolve) => { hostKeyResolverRef.current = resolve; setHostKeyPrompt({ title, message }); }), []);
   const closeHostKeyPrompt = useCallback((accepted: boolean) => { hostKeyResolverRef.current?.(accepted); hostKeyResolverRef.current = null; setHostKeyPrompt(null); }, []);
@@ -1636,6 +1637,7 @@ export function App() {
           id: transferId,
           direction: "Upload",
           sessionId: activeSession.id,
+          profileId: activeSession.profile_id,
           localPath,
           remotePath,
           status: "Running"
@@ -1705,6 +1707,7 @@ export function App() {
       id: transferId,
       direction: "Download",
       sessionId: activeSession.id,
+      profileId: activeSession.profile_id,
       localPath,
       remotePath: selectedRemoteEntry.path,
       bytesTotal: selectedRemoteEntry.size,
@@ -2025,7 +2028,8 @@ export function App() {
   }, [deleteLocalFile, flash, layoutSettings.skip_delete_confirmations, removeTransferRecord, requestDangerConfirmation]);
 
   const retryTransfer = useCallback(async (transfer: SftpProgress) => {
-    const session = sessions.find((item) => item.id === transfer.session_id && isConnectedState(item.state));
+    const session = sessions.find((item) => item.id === transfer.session_id && isConnectedState(item.state))
+      ?? sessions.find((item) => item.profile_id === transfer.profile_id && isConnectedState(item.state));
     if (!session) {
       flash("请先重新连接该 SSH 会话");
       return;
@@ -2036,11 +2040,13 @@ export function App() {
       id: transferId,
       direction: transfer.direction,
       sessionId: session.id,
+      profileId: session.profile_id,
       localPath: transfer.local_path,
       remotePath: transfer.remote_path,
       bytesTotal: transfer.bytes_total ?? null,
       status: "Running"
     });
+    removeTransferRecord(transfer.id);
     upsertTransfer(pending);
 
     try {
@@ -2054,7 +2060,25 @@ export function App() {
       markTransferFailed(transferId, pending, message);
       flash(`重试失败：${message}`);
     }
-  }, [flash, markTransferFailed, sessions, upsertTransfer]);
+  }, [flash, markTransferFailed, removeTransferRecord, sessions, upsertTransfer]);
+
+  useEffect(() => {
+    for (const transfer of transfers) {
+      const reason = typeof transfer.status === "object" && "Failed" in transfer.status
+        ? transfer.status.Failed.reason
+        : "";
+      if (!reason.startsWith("应用已重启") || autoResumedTransferIdsRef.current.has(transfer.id)) {
+        continue;
+      }
+      const hasConnectedSession = sessions.some((session) => isConnectedState(session.state)
+        && (session.id === transfer.session_id || session.profile_id === transfer.profile_id));
+      if (!hasConnectedSession) {
+        continue;
+      }
+      autoResumedTransferIdsRef.current.add(transfer.id);
+      void retryTransfer(transfer);
+    }
+  }, [retryTransfer, sessions, transfers]);
 
   const uploadDraggedFiles = useCallback(async (paths: string[]) => {
     await uploadLocalPaths(paths);

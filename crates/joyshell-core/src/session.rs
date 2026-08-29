@@ -1491,6 +1491,7 @@ fn download_sftp_file_from_ssh(
         let mut progress = SftpProgress {
             id: transfer_id,
             session_id,
+            profile_id: None,
             direction: FileTransferDirection::Download,
             local_path: local_path.to_string(),
             remote_path: remote_path.clone(),
@@ -1650,6 +1651,7 @@ fn upload_sftp_file_from_ssh(
         let mut progress = SftpProgress {
             id: transfer_id,
             session_id,
+            profile_id: None,
             direction: FileTransferDirection::Upload,
             local_path: local_path.to_string(),
             remote_path: remote_path.clone(),
@@ -1829,6 +1831,7 @@ fn emit_failed_sftp_progress(
         &SftpProgress {
             id: transfer_id,
             session_id,
+            profile_id: None,
             direction,
             local_path: local_path.to_string(),
             remote_path: remote_path.to_string(),

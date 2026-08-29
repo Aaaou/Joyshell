@@ -12,7 +12,11 @@ export function useTransferRuntime() {
     let active = true;
     void listTransfers().then((items) => {
       if (active && items.length > 0) {
-        setTransfers(items.slice(0, 20));
+        const restored = items.slice(0, 20).map((item) => isTransferActive(item.status)
+          ? { ...item, status: { Failed: { reason: "应用已重启，重新连接服务器后可继续传输" } } } satisfies SftpProgress
+          : item);
+        setTransfers(restored);
+        restored.forEach((item) => { void saveTransfer(item).catch(() => undefined); });
       }
     }).catch(() => undefined);
     return () => { active = false; };
@@ -64,11 +68,18 @@ export function useTransferRuntime() {
       };
       return next;
     });
-    setTransfers((current) => [
-      progress,
-      ...current.filter((item) => item.id !== progress.id && item.id !== replaceId)
-    ].slice(0, 20));
-    void saveTransfer(progress).catch(() => undefined);
+    setTransfers((current) => {
+      const existing = current.find((item) => item.id === progress.id || item.id === replaceId);
+      const merged = {
+        ...progress,
+        profile_id: progress.profile_id ?? existing?.profile_id ?? null
+      };
+      void saveTransfer(merged).catch(() => undefined);
+      return [
+        merged,
+        ...current.filter((item) => item.id !== progress.id && item.id !== replaceId)
+      ].slice(0, 20);
+    });
     if (!isTransferActive(progress.status)) {
       setCancellingTransfers((current) => {
         if (!current[progress.id]) {
@@ -98,8 +109,10 @@ export function useTransferRuntime() {
     });
     setTransfers((current) => {
       const existing = current.find((item) => item.id === transferId) ?? fallback;
+      const failed = { ...existing, status: { Failed: { reason } } } satisfies SftpProgress;
+      void saveTransfer(failed).catch(() => undefined);
       return [
-        { ...existing, status: { Failed: { reason } } },
+        failed,
         ...current.filter((item) => item.id !== transferId)
       ].slice(0, 20);
     });

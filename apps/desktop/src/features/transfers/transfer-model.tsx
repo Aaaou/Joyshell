@@ -253,6 +253,7 @@ export function createTransferProgress({
   id = crypto.randomUUID(),
   direction,
   sessionId,
+  profileId,
   localPath,
   remotePath,
   bytesTotal = null,
@@ -261,6 +262,7 @@ export function createTransferProgress({
   id?: string;
   direction: SftpProgress["direction"];
   sessionId: string;
+  profileId?: string | null;
   localPath: string;
   remotePath: string;
   bytesTotal?: number | null;
@@ -269,6 +271,7 @@ export function createTransferProgress({
   return {
     id,
     session_id: sessionId,
+    profile_id: profileId ?? null,
     direction,
     local_path: localPath,
     remote_path: remotePath,
