@@ -43,6 +43,7 @@ import { FileKindIcon } from "../ui/FileKindIcon";
 import { OperatingSystemIcon } from "../ui/OperatingSystemIcon";
 import { DangerConfirmDialog } from "../features/dialogs/DangerConfirmDialog";
 import { TextInputDialog } from "../features/dialogs/TextInputDialog";
+import { HostKeyConfirmDialog } from "../features/dialogs/HostKeyConfirmDialog";
 import { JoyshellSplash } from "../features/splash/JoyshellSplash";
 import type {
   CommandSnippet,
@@ -96,7 +97,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.58";
+const clientBuildLabel = "0.1.59";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -345,6 +346,10 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
   const [textInputDialog, setTextInputDialog] = useState<TextInputDialogState | null>(null);
+  const [hostKeyPrompt, setHostKeyPrompt] = useState<{ title: string; message: string } | null>(null);
+  const hostKeyResolverRef = useRef<((accepted: boolean) => void) | null>(null);
+  const requestHostKeyConfirmation = useCallback((title: string, message: string) => new Promise<boolean>((resolve) => { hostKeyResolverRef.current = resolve; setHostKeyPrompt({ title, message }); }), []);
+  const closeHostKeyPrompt = useCallback((accepted: boolean) => { hostKeyResolverRef.current?.(accepted); hostKeyResolverRef.current = null; setHostKeyPrompt(null); }, []);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
   const [editingRemotePath, setEditingRemotePath] = useState<string | null>(null);
@@ -1261,7 +1266,7 @@ export function App() {
         const prompt = String(firstError instanceof Error ? firstError.message : firstError);
         if (!prompt.startsWith("HOST_KEY_PROMPT:")) throw firstError;
         const [host, portText, keyType, keyBase64, fingerprint, reason] = prompt.slice("HOST_KEY_PROMPT:".length).split("|");
-        const accepted = window.confirm(`${reason === "changed" ? "主机密钥已变化" : "首次连接，尚未信任此主机"}\n${host}:${portText}\n算法：${keyType}\n指纹：${fingerprint}\n\n是否信任并继续？`);
+        const accepted = await requestHostKeyConfirmation(reason === "changed" ? "确认更新主机密钥" : "信任新主机", `${reason === "changed" ? "主机密钥已变化" : "首次连接，尚未信任此主机"}\n${host}:${portText}\n算法：${keyType}\n指纹：${fingerprint}`);
         if (!accepted) throw new Error("已拒绝主机密钥，连接未建立");
         await desktopClient.acceptKnownHost(host, Number(portText), keyType, keyBase64, reason === "changed");
         session = await connectProfile(profile.id, shellId);
@@ -1282,7 +1287,7 @@ export function App() {
     } finally {
       setConnecting(false);
     }
-  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput, resetTerminalRuntimeOutputCursor, syncTerminalOutputBatch]);
+  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput, requestHostKeyConfirmation, resetTerminalRuntimeOutputCursor, syncTerminalOutputBatch]);
 
   const handleProfileDoubleClick = useCallback(async (profile: SessionProfile) => {
     const decision = resolveProfileDoubleClickDecision({
@@ -3199,6 +3204,7 @@ export function App() {
           onConfirm={(value) => closeTextInputDialog(value)}
         />
       ) : null}
+      {hostKeyPrompt ? <HostKeyConfirmDialog title={hostKeyPrompt.title} message={hostKeyPrompt.message} onCancel={() => closeHostKeyPrompt(false)} onConfirm={() => closeHostKeyPrompt(true)} /> : null}
 
       {notice ? <div className="toast">{notice}</div> : null}
       {systemDialogOpen ? (
