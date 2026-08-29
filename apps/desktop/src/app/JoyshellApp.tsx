@@ -98,7 +98,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.66";
+const clientBuildLabel = "0.1.67";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -1759,7 +1759,7 @@ export function App() {
     if (!isTransferActive(transfer.status)) return;
     try {
       await pauseSftpTransfer(transfer.id);
-      flash(`已暂停：${remoteBasename(transfer.remote_path)}`);
+      flash(`正在暂停：${remoteBasename(transfer.remote_path)}`);
     } catch (error) {
       flash(`暂停失败：${error instanceof Error ? error.message : String(error)}`);
     }

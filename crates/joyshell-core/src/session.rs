@@ -1747,6 +1747,11 @@ fn upload_sftp_file_from_ssh(
                         emit_sftp_progress(manager, &progress);
                         return Ok(progress.clone());
                     }
+                    if manager.is_transfer_paused(transfer_id) {
+                        progress.status = TransferStatus::Paused;
+                        emit_sftp_progress(manager, &progress);
+                        return Ok(progress.clone());
+                    }
                     let read = local.read(&mut buffer)?;
                     if read == 0 {
                         break;
@@ -1770,6 +1775,11 @@ fn upload_sftp_file_from_ssh(
                 Err(error) => {
                     if manager.is_transfer_cancelled(transfer_id) {
                         progress.status = TransferStatus::Cancelled;
+                        emit_sftp_progress(manager, &progress);
+                        return Ok(progress);
+                    }
+                    if manager.is_transfer_paused(transfer_id) {
+                        progress.status = TransferStatus::Paused;
                         emit_sftp_progress(manager, &progress);
                         return Ok(progress);
                     }
