@@ -1,6 +1,8 @@
+use base64::Engine;
 use joyshell_agent::{
     AgentToolCall, AgentToolRegistry, AssistantRegistry, ContextBuilder, PermissionEngine,
 };
+use joyshell_core::{sha256_fingerprint, HostKeyCheck, KnownHostsStore};
 use joyshell_core::{
     AuthMethod, RemoteDirectoryListing, SessionInfo, SessionManager, SessionProfile, SftpProgress,
     SystemSnapshot, TerminalOutputBatch,
@@ -49,6 +51,8 @@ struct AppState {
     audit: AuditLog,
     secrets: Arc<RwLock<HashMap<String, String>>>,
     secret_key: [u8; 32],
+    known_hosts: Arc<RwLock<KnownHostsStore>>,
+    known_hosts_path: PathBuf,
 }
 
 impl AppState {
@@ -64,6 +68,11 @@ impl AppState {
             audit: AuditLog::default(),
             secrets: Arc::new(RwLock::new(HashMap::new())),
             secret_key: derive_local_secret_key(database_path),
+            known_hosts: Arc::new(RwLock::new(
+                KnownHostsStore::load(&database_path.with_file_name("known_hosts"))
+                    .unwrap_or_default(),
+            )),
+            known_hosts_path: database_path.with_file_name("known_hosts"),
         })
     }
 }
@@ -230,6 +239,7 @@ async fn connect_profile(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "profile was not found".to_string())?;
     let session_id = session_id.unwrap_or_else(Uuid::new_v4);
+    verify_host_key(&state, &profile)?;
     let handle = match &profile.auth_method {
         AuthMethod::Password { secret_ref } => {
             let password = load_secret(&state, secret_ref)?.ok_or_else(|| {
@@ -275,6 +285,68 @@ async fn connect_profile(
         .sessions
         .get_session(handle.id())
         .ok_or_else(|| "session did not start".to_string())
+}
+
+fn verify_host_key(state: &AppState, profile: &SessionProfile) -> Result<(), String> {
+    if matches!(
+        profile.host_key_policy,
+        joyshell_core::HostKeyPolicy::InsecureAcceptAny
+    ) {
+        return Ok(());
+    }
+    let address = format!("{}:{}", profile.host, profile.port);
+    let socket_addr = address
+        .to_socket_addrs()
+        .map_err(|error| error.to_string())?
+        .next()
+        .ok_or_else(|| "host did not resolve".to_string())?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(8))
+        .map_err(|error| error.to_string())?;
+    let mut session = ssh2::Session::new().map_err(|error| error.to_string())?;
+    session.set_tcp_stream(tcp);
+    session.set_timeout(8000);
+    session.handshake().map_err(|error| error.to_string())?;
+    let (key, key_type) = session
+        .host_key()
+        .ok_or_else(|| "server did not provide a host key".to_string())?;
+    let key_base64 = base64::engine::general_purpose::STANDARD.encode(key);
+    let key_type = format!("{:?}", key_type).to_ascii_lowercase();
+    let fingerprint = sha256_fingerprint(&key_base64).map_err(|error| error.to_string())?;
+    let check = state
+        .known_hosts
+        .read()
+        .map_err(|_| "known_hosts unavailable".to_string())?
+        .check(&profile.host, profile.port, &key_type, &key_base64);
+    match check {
+        HostKeyCheck::Match => Ok(()),
+        HostKeyCheck::Unknown => Err(format!(
+            "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|unknown",
+            profile.host, profile.port, key_type, key_base64, fingerprint
+        )),
+        HostKeyCheck::Changed { .. } => Err(format!(
+            "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|changed",
+            profile.host, profile.port, key_type, key_base64, fingerprint
+        )),
+    }
+}
+
+#[tauri::command]
+fn accept_known_host(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    key_type: String,
+    key_base64: String,
+    _update: bool,
+) -> Result<(), String> {
+    let mut store = state
+        .known_hosts
+        .write()
+        .map_err(|_| "known_hosts unavailable".to_string())?;
+    store.accept(&host, port, &key_type, &key_base64);
+    store
+        .save(&state.known_hosts_path)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1043,6 +1115,7 @@ pub fn run() {
             get_layout_settings,
             save_layout_settings,
             connect_profile,
+            accept_known_host,
             disconnect_profile,
             write_terminal,
             session_diagnostics,

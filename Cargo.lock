@@ -1811,6 +1811,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "chrono",
  "joyshell-agent",
  "joyshell-core",
@@ -1818,6 +1819,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "ssh2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

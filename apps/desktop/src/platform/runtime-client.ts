@@ -126,6 +126,12 @@ export async function connectProfile(profileId: string, sessionId?: string): Pro
   throw new Error("网页预览没有 Tauri/Rust 后端，不能执行真实 SSH 连接。请使用桌面安装包或 Tauri dev 运行。");
 }
 
+export async function acceptKnownHost(host: string, port: number, keyType: string, keyBase64: string, update = false): Promise<void> {
+  if (canUseTauri) {
+    await invoke("accept_known_host", { host, port, keyType, keyBase64, update });
+  }
+}
+
 export async function disconnectProfile(sessionId: string): Promise<void> {
   if (canUseTauri) {
     await invoke("disconnect_profile", { sessionId });

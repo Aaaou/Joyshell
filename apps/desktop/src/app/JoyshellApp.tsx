@@ -96,7 +96,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.56";
+const clientBuildLabel = "0.1.57";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -1254,7 +1254,18 @@ export function App() {
     replaceTerminalOutput(buildConnectingTerminalSeed(profile), shellId);
 
     try {
-      const session = await connectProfile(profile.id, shellId);
+      let session: SessionInfo;
+      try {
+        session = await connectProfile(profile.id, shellId);
+      } catch (firstError) {
+        const prompt = String(firstError instanceof Error ? firstError.message : firstError);
+        if (!prompt.startsWith("HOST_KEY_PROMPT:")) throw firstError;
+        const [, host, portText, keyType, keyBase64, fingerprint, reason] = prompt.split("|");
+        const accepted = window.confirm(`${reason === "changed" ? "主机密钥已变化" : "首次连接，尚未信任此主机"}\n${host}:${portText}\n算法：${keyType}\n指纹：${fingerprint}\n\n是否信任并继续？`);
+        if (!accepted) throw new Error("已拒绝主机密钥，连接未建立");
+        await desktopClient.acceptKnownHost(host, Number(portText), keyType, keyBase64, reason === "changed");
+        session = await connectProfile(profile.id, shellId);
+      }
       setSessions((current) => [
         session,
         ...current.filter((item) => item.id !== session.id)

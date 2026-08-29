@@ -13,6 +13,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
+ssh2.workspace = true
 arboard = "3.6"
 chrono.workspace = true
 serde.workspace = true
