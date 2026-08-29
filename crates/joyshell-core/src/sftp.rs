@@ -30,6 +30,7 @@ pub enum FileTransferDirection {
 pub enum TransferStatus {
     Queued,
     Running,
+    Paused,
     Retrying {
         attempt: u32,
         max_attempts: u32,

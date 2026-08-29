@@ -20,6 +20,7 @@ import {
   Minus,
   Minimize2,
   Network,
+  Pause,
   Palette,
   PanelBottom,
   PanelRight,
@@ -97,7 +98,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.65";
+const clientBuildLabel = "0.1.66";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -230,6 +231,7 @@ import { useTransferRuntime } from "../features/transfers/use-transfer-runtime";
 const {
   collectSystemSnapshot,
   cancelSftpTransfer,
+  pauseSftpTransfer,
   connectProfile,
   disconnectProfile,
   deleteCommandSnippet,
@@ -1753,6 +1755,16 @@ export function App() {
     }
   }, [cancellingTransfers, flash]);
 
+  const pauseTransfer = useCallback(async (transfer: SftpProgress) => {
+    if (!isTransferActive(transfer.status)) return;
+    try {
+      await pauseSftpTransfer(transfer.id);
+      flash(`已暂停：${remoteBasename(transfer.remote_path)}`);
+    } catch (error) {
+      flash(`暂停失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [flash]);
+
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
   }, []);
@@ -2963,6 +2975,15 @@ export function App() {
                     </div>
                   </div>
                   <div className="transfer-row-actions">
+                    {transfer.status === "Paused" ? (
+                      <button onClick={() => { void retryTransfer(transfer); }} title="继续传输">
+                        <Play size={13} />
+                      </button>
+                    ) : (
+                      <button onClick={() => { void pauseTransfer(transfer); }} disabled={!isTransferActive(transfer.status) || isCancelling} title="暂停传输">
+                        <Pause size={13} />
+                      </button>
+                    )}
                     <button
                       onClick={() => { void cancelTransfer(transfer); }}
                       disabled={!isTransferActive(transfer.status) || isCancelling}

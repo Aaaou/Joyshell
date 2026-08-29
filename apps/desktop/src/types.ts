@@ -146,6 +146,7 @@ export type FileTransferDirection = "Upload" | "Download";
 export type TransferStatus =
   | "Queued"
   | "Running"
+  | "Paused"
   | { Retrying: { attempt: number; max_attempts: number; reason: string } }
   | "Completed"
   | "Cancelled"

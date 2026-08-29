@@ -318,6 +318,7 @@ pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<SessionId, SessionRuntime>>>,
     events: broadcast::Sender<SessionEvent>,
     cancelled_transfers: Arc<RwLock<HashSet<Uuid>>>,
+    paused_transfers: Arc<RwLock<HashSet<Uuid>>>,
 }
 
 impl Default for SessionManager {
@@ -333,6 +334,7 @@ impl SessionManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             events,
             cancelled_transfers: Arc::new(RwLock::new(HashSet::new())),
+            paused_transfers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -787,12 +789,21 @@ impl SessionManager {
         self.cancelled_transfers.write().insert(transfer_id);
     }
 
+    pub fn pause_sftp_transfer(&self, transfer_id: Uuid) {
+        self.paused_transfers.write().insert(transfer_id);
+    }
+
     fn clear_cancelled_transfer(&self, transfer_id: Uuid) {
         self.cancelled_transfers.write().remove(&transfer_id);
+        self.paused_transfers.write().remove(&transfer_id);
     }
 
     fn is_transfer_cancelled(&self, transfer_id: Uuid) -> bool {
         self.cancelled_transfers.read().contains(&transfer_id)
+    }
+
+    fn is_transfer_paused(&self, transfer_id: Uuid) -> bool {
+        self.paused_transfers.read().contains(&transfer_id)
     }
 
     fn side_connection_credentials(
@@ -1572,6 +1583,11 @@ fn download_sftp_file_from_ssh(
                         emit_sftp_progress(manager, &progress);
                         return Ok(progress.clone());
                     }
+                    if manager.is_transfer_paused(transfer_id) {
+                        progress.status = TransferStatus::Paused;
+                        emit_sftp_progress(manager, &progress);
+                        return Ok(progress.clone());
+                    }
                     let read = remote.read(&mut buffer)?;
                     if read == 0 {
                         break;
@@ -1595,6 +1611,11 @@ fn download_sftp_file_from_ssh(
                 Err(error) => {
                     if manager.is_transfer_cancelled(transfer_id) {
                         progress.status = TransferStatus::Cancelled;
+                        emit_sftp_progress(manager, &progress);
+                        return Ok(progress);
+                    }
+                    if manager.is_transfer_paused(transfer_id) {
+                        progress.status = TransferStatus::Paused;
                         emit_sftp_progress(manager, &progress);
                         return Ok(progress);
                     }

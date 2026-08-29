@@ -434,6 +434,12 @@ async fn disconnect_profile(state: State<'_, AppState>, session_id: Uuid) -> Res
 }
 
 #[tauri::command]
+fn pause_sftp_transfer(state: State<'_, AppState>, transfer_id: Uuid) -> Result<(), String> {
+    state.sessions.pause_sftp_transfer(transfer_id);
+    Ok(())
+}
+
+#[tauri::command]
 fn list_command_snippets(state: State<'_, AppState>) -> Result<Vec<CommandSnippet>, String> {
     state
         .profiles
@@ -1197,6 +1203,7 @@ pub fn run() {
             save_transfer,
             delete_transfer,
             disconnect_profile,
+            pause_sftp_transfer,
             write_terminal,
             session_diagnostics,
             terminal_output_tail,

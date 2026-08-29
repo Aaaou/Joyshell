@@ -505,6 +505,12 @@ export async function cancelSftpTransfer(transferId: string): Promise<void> {
   }
 }
 
+export async function pauseSftpTransfer(transferId: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("pause_sftp_transfer", { transferId });
+  }
+}
+
 export async function revealLocalPath(path: string): Promise<void> {
   if (canUseTauri) {
     await invoke("reveal_local_path", { path });
