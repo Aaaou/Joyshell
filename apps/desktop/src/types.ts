@@ -15,6 +15,7 @@ export type SessionProfile = {
   operating_system?: string | null;
   username: string;
   auth_method?: SessionAuthMethod;
+  agent_identity_fingerprint?: string | null;
   host_key_policy?: "Strict" | "AcceptNew" | "InsecureAcceptAny";
   jump_host_id?: string | null;
   tags: string[];
@@ -69,9 +70,44 @@ export type SessionInfo = {
   host: string;
   port: number;
   username: string;
-  state: "Disconnected" | "Connecting" | "Connected" | "Reconnecting" | { Failed: { reason: string } };
+  state: "Disconnected" | "Connecting" | "HostKeyPending" | "Connected" | "Reconnecting" | { Failed: { reason: string } };
   connected_at?: string | null;
   last_seen_at: string;
+};
+
+export type HostKeyPrompt = {
+  token: string;
+  session_id: string;
+  profile_id: string;
+  host: string;
+  port: number;
+  key_type: string;
+  key_base64: string;
+  fingerprint: string;
+  previous_fingerprint?: string | null;
+  reason: "unknown" | "changed";
+  created_at: string;
+};
+
+export type AgentIdentity = {
+  fingerprint: string;
+  comment: string;
+  algorithm: string;
+};
+
+export type KnownHostEntry = {
+  host: string;
+  port: number;
+  key_type: string;
+  fingerprint: string;
+};
+
+export type CredentialStorageStatus = {
+  backend: string;
+  native: boolean;
+  fallback_active: boolean;
+  legacy_secrets_pending: boolean;
+  legacy_secret_count: number;
 };
 
 export type TerminalOutput = {
@@ -150,7 +186,8 @@ export type TransferStatus =
   | { Retrying: { attempt: number; max_attempts: number; reason: string } }
   | "Completed"
   | "Cancelled"
-  | { Failed: { reason: string } };
+  | { Failed: { reason: string } }
+  | { NeedsAttention: { reason: string; expected_size?: number | null; actual_size?: number | null } };
 
 export type SftpProgress = {
   id: string;
@@ -162,6 +199,14 @@ export type SftpProgress = {
   bytes_done: number;
   bytes_total?: number | null;
   status: TransferStatus;
+  created_at?: string | null;
+  updated_at?: string | null;
+  retry_count?: number;
+  last_error?: string | null;
+  source_size?: number | null;
+  source_modified_at?: number | null;
+  target_size?: number | null;
+  target_modified_at?: number | null;
 };
 
 export type LanDevice = {

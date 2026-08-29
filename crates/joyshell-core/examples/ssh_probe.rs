@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         auth_method: AuthMethod::Password {
             secret_ref: "env://JOYSHELL_SSH_PASSWORD".to_string(),
         },
+        agent_identity_fingerprint: None,
         host_key_policy: HostKeyPolicy::AcceptNew,
         tags: Vec::new(),
         favorite: false,

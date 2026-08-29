@@ -40,6 +40,11 @@ pub enum TransferStatus {
     Failed {
         reason: String,
     },
+    NeedsAttention {
+        reason: String,
+        expected_size: Option<u64>,
+        actual_size: Option<u64>,
+    },
     Cancelled,
 }
 
@@ -80,4 +85,28 @@ pub struct SftpProgress {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
     pub status: TransferStatus,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub source_size: Option<u64>,
+    #[serde(default)]
+    pub source_modified_at: Option<u64>,
+    #[serde(default)]
+    pub target_size: Option<u64>,
+    #[serde(default)]
+    pub target_modified_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferConflictDecision {
+    Restart,
+    Continue,
+    Cancel,
 }

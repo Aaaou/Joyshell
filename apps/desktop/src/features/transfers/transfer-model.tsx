@@ -235,6 +235,9 @@ export function formatTransferStatus(transfer: SftpProgress) {
     const { attempt, max_attempts, reason } = transfer.status.Retrying;
     return `Retrying ${attempt}/${max_attempts}: ${reason}`;
   }
+  if ("NeedsAttention" in transfer.status) {
+    return `需要处理: ${transfer.status.NeedsAttention.reason}`;
+  }
   return `Failed: ${transfer.status.Failed.reason}`;
 }
 
@@ -277,10 +280,22 @@ export function createTransferProgress({
     remote_path: remotePath,
     bytes_done: 0,
     bytes_total: bytesTotal,
-    status
+    status,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    retry_count: 0,
+    last_error: null,
+    source_size: bytesTotal,
+    source_modified_at: null,
+    target_size: null,
+    target_modified_at: null
   };
 }
 
 export function isTransferActive(status: SftpProgress["status"]) {
   return status === "Running" || status === "Queued" || (typeof status !== "string" && "Retrying" in status);
+}
+
+export function transferNeedsAttention(transfer: SftpProgress) {
+  return typeof transfer.status === "object" && "NeedsAttention" in transfer.status;
 }

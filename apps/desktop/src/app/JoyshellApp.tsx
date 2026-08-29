@@ -45,12 +45,14 @@ import { OperatingSystemIcon } from "../ui/OperatingSystemIcon";
 import { DangerConfirmDialog } from "../features/dialogs/DangerConfirmDialog";
 import { TextInputDialog } from "../features/dialogs/TextInputDialog";
 import { HostKeyConfirmDialog } from "../features/dialogs/HostKeyConfirmDialog";
+import { TransferConflictDialog } from "../features/dialogs/TransferConflictDialog";
 import { JoyshellSplash } from "../features/splash/JoyshellSplash";
 import type {
   CommandSnippet,
   ChromeGradientPreset,
   RemoteDirectoryListing,
   RemoteFileEntry,
+  HostKeyPrompt,
   SessionInfo,
   SessionFolder,
   SessionProfile,
@@ -82,6 +84,7 @@ import {
   reorderProfileByPointer,
   resolveProfileDoubleClickDecision
 } from "../features/sessions/session-model";
+import { enqueueHostKeyPrompt, removeHostKeyPrompt } from "../features/sessions/host-key-model";
 import {
   buildSystemInfoClipboard,
   clampPercent,
@@ -98,7 +101,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.67";
+const clientBuildLabel = "0.1.68";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -222,9 +225,15 @@ import {
   getDisconnectedReason,
   isConnectedState,
   isTransferActive,
+  transferNeedsAttention,
   latencyTone,
   TransferMetric
 } from "../features/transfers/transfer-model";
+import {
+  isRecoverableTransferFailure,
+  isScheduledTransferRetryCurrent,
+  recoverableTransferFailureReason
+} from "../features/transfers/transfer-retry-model";
 import { useTransferClock } from "../features/transfers/use-transfer-clock";
 import { useTransferRuntime } from "../features/transfers/use-transfer-runtime";
 
@@ -308,7 +317,7 @@ export function App() {
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
-  const [appSettingsPage, setAppSettingsPage] = useState<"general" | "appearance">("general");
+  const [appSettingsPage, setAppSettingsPage] = useState<"general" | "appearance" | "security">("general");
   const [systemDialogOpen, setSystemDialogOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<SessionProfile | null>(null);
   const [connecting, setConnecting] = useState(false);
@@ -348,11 +357,13 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dangerConfirm, setDangerConfirm] = useState<DangerConfirmState | null>(null);
   const [textInputDialog, setTextInputDialog] = useState<TextInputDialogState | null>(null);
-  const [hostKeyPrompt, setHostKeyPrompt] = useState<{ title: string; message: string } | null>(null);
+  const [hostKeyPrompts, setHostKeyPrompts] = useState<HostKeyPrompt[]>([]);
+  const [hostKeySubmitting, setHostKeySubmitting] = useState(false);
+  const [transferConflict, setTransferConflict] = useState<SftpProgress | null>(null);
+  const [transferConflictSubmitting, setTransferConflictSubmitting] = useState(false);
   const autoResumedTransferIdsRef = useRef(new Set<string>());
-  const hostKeyResolverRef = useRef<((accepted: boolean) => void) | null>(null);
-  const requestHostKeyConfirmation = useCallback((title: string, message: string) => new Promise<boolean>((resolve) => { hostKeyResolverRef.current = resolve; setHostKeyPrompt({ title, message }); }), []);
-  const closeHostKeyPrompt = useCallback((accepted: boolean) => { hostKeyResolverRef.current?.(accepted); hostKeyResolverRef.current = null; setHostKeyPrompt(null); }, []);
+  const autoResumeTimersRef = useRef(new Map<string, { retryKey: string; timer: number }>());
+  const transfersRef = useRef<SftpProgress[]>([]);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
   const [editingRemotePath, setEditingRemotePath] = useState<string | null>(null);
@@ -509,6 +520,17 @@ export function App() {
   }, [profiles]);
 
   useEffect(() => {
+    transfersRef.current = transfers;
+  }, [transfers]);
+
+  useEffect(() => () => {
+    for (const entry of autoResumeTimersRef.current.values()) {
+      window.clearTimeout(entry.timer);
+    }
+    autoResumeTimersRef.current.clear();
+  }, []);
+
+  useEffect(() => {
     shellProfileIdsRef.current = shellProfileIds;
   }, [shellProfileIds]);
 
@@ -520,6 +542,7 @@ export function App() {
       sessionId === activeProfileIdRef.current
       && !isConnectedState(state)
       && state !== "Connecting"
+      && state !== "HostKeyPending"
       && state !== "Reconnecting"
     ) {
       setLatencyMs(null);
@@ -533,10 +556,35 @@ export function App() {
     consumeTerminalOutput(output);
   }, [consumeTerminalOutput]);
 
+  const handleHostKeyPrompt = useCallback((prompt: HostKeyPrompt) => {
+    setHostKeySubmitting(false);
+    setHostKeyPrompts((current) => enqueueHostKeyPrompt(current, prompt));
+  }, []);
+
+  const hostKeyPrompt = hostKeyPrompts[0] ?? null;
+
+  const resolveCurrentHostKeyPrompt = useCallback(async (accepted: boolean) => {
+    if (!hostKeyPrompt || hostKeySubmitting) return;
+    setHostKeySubmitting(true);
+    try {
+      await desktopClient.resolveHostKeyPrompt(
+        hostKeyPrompt.token,
+        hostKeyPrompt.session_id,
+        accepted ? (hostKeyPrompt.reason === "changed" ? "update" : "accept") : "reject"
+      );
+      setHostKeyPrompts((current) => removeHostKeyPrompt(current, hostKeyPrompt.token));
+    } catch (error) {
+      flash(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHostKeySubmitting(false);
+    }
+  }, [flash, hostKeyPrompt, hostKeySubmitting]);
+
   useSessionEvents({
     onStateChanged: handleSessionStateChanged,
     onTerminalOutput: handleTerminalOutput,
-    onSftpProgress: upsertTransfer
+    onSftpProgress: upsertTransfer,
+    onHostKeyPrompt: handleHostKeyPrompt
   });
   const activeShellProfileId = activeProfileId
     ? shellProfileIds[activeProfileId] ?? activeProfileId
@@ -1262,18 +1310,7 @@ export function App() {
     replaceTerminalOutput(buildConnectingTerminalSeed(profile), shellId);
 
     try {
-      let session: SessionInfo;
-      try {
-        session = await connectProfile(profile.id, shellId);
-      } catch (firstError) {
-        const prompt = String(firstError instanceof Error ? firstError.message : firstError);
-        if (!prompt.startsWith("HOST_KEY_PROMPT:")) throw firstError;
-        const [host, portText, keyType, keyBase64, fingerprint, reason, previousFingerprint] = prompt.slice("HOST_KEY_PROMPT:".length).split("|");
-        const accepted = await requestHostKeyConfirmation(reason === "changed" ? "确认更新主机密钥" : "信任新主机", `${reason === "changed" ? "主机密钥已变化，连接已阻断" : "首次连接，尚未信任此主机"}\n${host}:${portText}\n算法：${keyType}\n${reason === "changed" ? `旧指纹：${previousFingerprint}\n新指纹：${fingerprint}` : `指纹：${fingerprint}`}`);
-        if (!accepted) throw new Error("已拒绝主机密钥，连接未建立");
-        await desktopClient.acceptKnownHost(host, Number(portText), keyType, keyBase64, reason === "changed");
-        session = await connectProfile(profile.id, shellId);
-      }
+      const session = await connectProfile(profile.id, shellId);
       setSessions((current) => [
         session,
         ...current.filter((item) => item.id !== session.id)
@@ -1290,7 +1327,7 @@ export function App() {
     } finally {
       setConnecting(false);
     }
-  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput, requestHostKeyConfirmation, resetTerminalRuntimeOutputCursor, syncTerminalOutputBatch]);
+  }, [connectedSessionIds, flash, openShellProfile, replaceTerminalOutput, resetTerminalRuntimeOutputCursor, syncTerminalOutputBatch]);
 
   const handleProfileDoubleClick = useCallback(async (profile: SessionProfile) => {
     const decision = resolveProfileDoubleClickDecision({
@@ -1648,6 +1685,11 @@ export function App() {
         try {
           const completed = await sftpUploadFile(activeSession.id, transferId, localPath, remotePath);
           upsertTransfer(completed, pending.id);
+          if (transferNeedsAttention(completed)) {
+            flash(`需要确认后继续：${localName}`);
+            setSftpStatus("目标文件状态发生变化，等待处理");
+            return;
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           markTransferFailed(transferId, pending, message);
@@ -1720,6 +1762,11 @@ export function App() {
     try {
       const completed = await sftpDownloadFile(activeSession.id, transferId, selectedRemoteEntry.path, localPath);
       upsertTransfer(completed, pending.id);
+      if (transferNeedsAttention(completed)) {
+        flash(`文件状态发生变化，请选择处理方式：${selectedRemoteEntry.name}`);
+        setSftpStatus("目标文件状态发生变化，等待处理");
+        return;
+      }
       flash(`下载完成：${selectedRemoteEntry.name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1741,6 +1788,18 @@ export function App() {
       [transfer.id]: true
     }));
 
+    const scheduledRetry = autoResumeTimersRef.current.get(transfer.id);
+    if (scheduledRetry) {
+      window.clearTimeout(scheduledRetry.timer);
+      autoResumeTimersRef.current.delete(transfer.id);
+      autoResumedTransferIdsRef.current.delete(scheduledRetry.retryKey);
+      upsertTransfer({
+        ...transfer,
+        status: "Cancelled",
+        updated_at: new Date().toISOString()
+      });
+    }
+
     try {
       await cancelSftpTransfer(transfer.id);
       flash(`已发送取消请求：${remoteBasename(transfer.remote_path)}`);
@@ -1753,7 +1812,7 @@ export function App() {
       });
       flash(`取消失败：${message}`);
     }
-  }, [cancellingTransfers, flash]);
+  }, [cancellingTransfers, flash, upsertTransfer]);
 
   const pauseTransfer = useCallback(async (transfer: SftpProgress) => {
     if (!isTransferActive(transfer.status)) return;
@@ -2035,6 +2094,12 @@ export function App() {
         return;
       }
     }
+    const scheduledRetry = autoResumeTimersRef.current.get(transfer.id);
+    if (scheduledRetry) {
+      window.clearTimeout(scheduledRetry.timer);
+      autoResumeTimersRef.current.delete(transfer.id);
+      autoResumedTransferIdsRef.current.delete(scheduledRetry.retryKey);
+    }
     removeTransferRecord(transfer.id);
     flash(deleteLocal ? "已移除记录并删除本地文件" : "已移除传输记录");
   }, [deleteLocalFile, flash, layoutSettings.skip_delete_confirmations, removeTransferRecord, requestDangerConfirmation]);
@@ -2047,18 +2112,16 @@ export function App() {
       return;
     }
 
-    const transferId = crypto.randomUUID();
-    const pending = createTransferProgress({
-      id: transferId,
-      direction: transfer.direction,
-      sessionId: session.id,
-      profileId: session.profile_id,
-      localPath: transfer.local_path,
-      remotePath: transfer.remote_path,
-      bytesTotal: transfer.bytes_total ?? null,
-      status: "Running"
-    });
-    removeTransferRecord(transfer.id);
+    const transferId = transfer.id;
+    const pending: SftpProgress = {
+      ...transfer,
+      session_id: session.id,
+      profile_id: session.profile_id,
+      status: "Running",
+      updated_at: new Date().toISOString(),
+      retry_count: (transfer.retry_count ?? 0) + 1,
+      last_error: null
+    };
     upsertTransfer(pending);
 
     try {
@@ -2066,20 +2129,60 @@ export function App() {
         ? await sftpUploadFile(session.id, transferId, transfer.local_path, transfer.remote_path)
         : await sftpDownloadFile(session.id, transferId, transfer.remote_path, transfer.local_path);
       upsertTransfer(completed, pending.id);
-      flash(`重试完成：${remoteBasename(transfer.remote_path)}`);
+      flash(transferNeedsAttention(completed)
+        ? `文件状态发生变化，请选择处理方式：${remoteBasename(transfer.remote_path)}`
+        : `重试完成：${remoteBasename(transfer.remote_path)}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       markTransferFailed(transferId, pending, message);
       flash(`重试失败：${message}`);
     }
-  }, [flash, markTransferFailed, removeTransferRecord, sessions, upsertTransfer]);
+  }, [flash, markTransferFailed, sessions, upsertTransfer]);
+
+  useEffect(() => {
+    if (transferConflict) {
+      const current = transfers.find((item) => item.id === transferConflict.id);
+      if (!current || typeof current.status !== "object" || !("NeedsAttention" in current.status)) {
+        setTransferConflict(null);
+      }
+      return;
+    }
+    const pendingConflict = transfers.find((item) => typeof item.status === "object" && "NeedsAttention" in item.status);
+    if (pendingConflict) setTransferConflict(pendingConflict);
+  }, [transferConflict, transfers]);
+
+  const resolveTransferConflict = useCallback(async (decision: "restart" | "continue" | "cancel") => {
+    if (!transferConflict || transferConflictSubmitting) return;
+    if (decision !== "cancel") {
+      const session = sessions.find((item) => item.id === transferConflict.session_id && isConnectedState(item.state))
+        ?? sessions.find((item) => item.profile_id === transferConflict.profile_id && isConnectedState(item.state));
+      if (!session) {
+        flash("请先连接对应的 SSH 会话，再处理传输冲突");
+        return;
+      }
+    }
+    setTransferConflictSubmitting(true);
+    try {
+      await desktopClient.resolveTransferConflict(transferConflict.id, decision);
+      if (decision === "cancel") {
+        upsertTransfer({ ...transferConflict, status: "Cancelled", updated_at: new Date().toISOString() });
+      } else {
+        await retryTransfer(transferConflict);
+      }
+      setTransferConflict(null);
+    } catch (error) {
+      flash(`冲突处理失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setTransferConflictSubmitting(false);
+    }
+  }, [flash, retryTransfer, sessions, transferConflict, transferConflictSubmitting, upsertTransfer]);
 
   useEffect(() => {
     for (const transfer of transfers) {
-      const reason = typeof transfer.status === "object" && "Failed" in transfer.status
-        ? transfer.status.Failed.reason
-        : "";
-      if (!reason.startsWith("应用已重启") || autoResumedTransferIdsRef.current.has(transfer.id)) {
+      const reason = recoverableTransferFailureReason(transfer);
+      const retryCount = transfer.retry_count ?? 0;
+      const retryKey = `${transfer.id}:${retryCount}`;
+      if (!isRecoverableTransferFailure(reason) || retryCount >= 5 || autoResumedTransferIdsRef.current.has(retryKey)) {
         continue;
       }
       const hasConnectedSession = sessions.some((session) => isConnectedState(session.state)
@@ -2087,10 +2190,35 @@ export function App() {
       if (!hasConnectedSession) {
         continue;
       }
-      autoResumedTransferIdsRef.current.add(transfer.id);
-      void retryTransfer(transfer);
+      autoResumedTransferIdsRef.current.add(retryKey);
+      const delayMs = Math.min(16_000, 1000 * (2 ** retryCount));
+      const existingTimer = autoResumeTimersRef.current.get(transfer.id);
+      if (existingTimer) window.clearTimeout(existingTimer.timer);
+      upsertTransfer({
+        ...transfer,
+        status: {
+          Retrying: {
+            attempt: retryCount + 1,
+            max_attempts: 5,
+            reason
+          }
+        },
+        updated_at: new Date().toISOString()
+      });
+      const timer = window.setTimeout(() => {
+        autoResumeTimersRef.current.delete(transfer.id);
+        const current = transfersRef.current.find((item) => item.id === transfer.id);
+        const stillConnected = current ? sessions.some((session) => isConnectedState(session.state)
+          && (session.id === current.session_id || session.profile_id === current.profile_id)) : false;
+        if (!current || !isScheduledTransferRetryCurrent(current, retryCount) || !stillConnected) {
+          autoResumedTransferIdsRef.current.delete(retryKey);
+          return;
+        }
+        void retryTransfer(current);
+      }, delayMs);
+      autoResumeTimersRef.current.set(transfer.id, { retryKey, timer });
     }
-  }, [retryTransfer, sessions, transfers]);
+  }, [retryTransfer, sessions, transfers, upsertTransfer]);
 
   const uploadDraggedFiles = useCallback(async (paths: string[]) => {
     await uploadLocalPaths(paths);
@@ -2366,6 +2494,16 @@ export function App() {
                   <span>
                     <strong>外观</strong>
                     <small>侧栏、面板和主题偏好</small>
+                  </span>
+                </button>
+                <button
+                  className={`settings-sidebar-item ${appSettingsPage === "security" ? "active" : ""}`}
+                  onClick={() => setAppSettingsPage("security")}
+                >
+                  <ShieldCheck size={15} />
+                  <span>
+                    <strong>安全与信任</strong>
+                    <small>凭据存储和已信任主机</small>
                   </span>
                 </button>
               </div>
@@ -3249,7 +3387,8 @@ export function App() {
           onConfirm={(value) => closeTextInputDialog(value)}
         />
       ) : null}
-      {hostKeyPrompt ? <HostKeyConfirmDialog title={hostKeyPrompt.title} message={hostKeyPrompt.message} onCancel={() => closeHostKeyPrompt(false)} onConfirm={() => closeHostKeyPrompt(true)} /> : null}
+      {hostKeyPrompt ? <HostKeyConfirmDialog prompt={hostKeyPrompt} submitting={hostKeySubmitting} onCancel={() => { void resolveCurrentHostKeyPrompt(false); }} onConfirm={() => { void resolveCurrentHostKeyPrompt(true); }} /> : null}
+      {transferConflict ? <TransferConflictDialog transfer={transferConflict} submitting={transferConflictSubmitting} onDecision={(decision) => { void resolveTransferConflict(decision); }} /> : null}
 
       {notice ? <div className="toast">{notice}</div> : null}
       {systemDialogOpen ? (

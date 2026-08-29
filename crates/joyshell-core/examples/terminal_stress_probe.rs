@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|_| "env://JOYSHELL_SSH_KEY_PASSPHRASE".to_string()),
         },
+        agent_identity_fingerprint: None,
         host_key_policy: HostKeyPolicy::AcceptNew,
         tags: Vec::new(),
         favorite: false,

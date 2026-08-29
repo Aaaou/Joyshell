@@ -45,7 +45,7 @@ impl KnownHostsStore {
             store.entries.push(KnownHostEntry {
                 host,
                 port,
-                key_type: fields[1].to_string(),
+                key_type: canonical_key_type(fields[1]).to_string(),
                 key_base64: fields[2].to_string(),
             });
         }
@@ -53,15 +53,15 @@ impl KnownHostsStore {
     }
 
     pub fn check(&self, host: &str, port: u16, key_type: &str, key_base64: &str) -> HostKeyCheck {
+        let key_type = canonical_key_type(key_type);
         let matches: Vec<&KnownHostEntry> = self
             .entries
             .iter()
             .filter(|entry| entry.host == host && entry.port == port)
             .collect();
-        if matches
-            .iter()
-            .any(|entry| entry.key_type == key_type && entry.key_base64 == key_base64)
-        {
+        if matches.iter().any(|entry| {
+            canonical_key_type(&entry.key_type) == key_type && entry.key_base64 == key_base64
+        }) {
             HostKeyCheck::Match
         } else if let Some(previous) = matches.first() {
             HostKeyCheck::Changed {
@@ -78,7 +78,7 @@ impl KnownHostsStore {
         self.entries.push(KnownHostEntry {
             host: host.to_string(),
             port,
-            key_type: key_type.to_string(),
+            key_type: canonical_key_type(key_type).to_string(),
             key_base64: key_base64.to_string(),
         });
     }
@@ -110,17 +110,39 @@ impl KnownHostsStore {
                 host, entry.key_type, entry.key_base64
             ));
         }
-        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        let suffix = uuid::Uuid::new_v4();
+        let temp_path = path.with_extension(format!("tmp-{suffix}"));
+        let backup_path = path.with_extension(format!("bak-{suffix}"));
         let mut file = std::fs::File::create(&temp_path)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        #[cfg(windows)]
         if path.exists() {
-            std::fs::remove_file(path)?;
+            std::fs::rename(path, &backup_path)?;
         }
-        std::fs::rename(&temp_path, path)?;
+        if let Err(error) = std::fs::rename(&temp_path, path) {
+            if backup_path.exists() {
+                let _ = std::fs::rename(&backup_path, path);
+            }
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        if backup_path.exists() {
+            std::fs::remove_file(backup_path)?;
+        }
         Ok(())
+    }
+}
+
+fn canonical_key_type(value: &str) -> &str {
+    match value {
+        "rsa" => "ssh-rsa",
+        "dss" => "ssh-dss",
+        "ecdsa256" => "ecdsa-sha2-nistp256",
+        "ecdsa384" => "ecdsa-sha2-nistp384",
+        "ecdsa521" => "ecdsa-sha2-nistp521",
+        "ed25519" => "ssh-ed25519",
+        value => value,
     }
 }
 
@@ -180,6 +202,47 @@ mod tests {
         store.save(&path).unwrap();
         let loaded = KnownHostsStore::load(&path).unwrap();
         assert_eq!(loaded.entries(), store.entries());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_ignores_comments_hashed_hosts_and_host_lists() {
+        let path = std::env::temp_dir().join(format!(
+            "joyshell-known-hosts-ignore-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "# comment\n\n|1|salt|hash ssh-ed25519 AQ==\na,b ssh-rsa Ag==\n[2001:db8::1]:2222 ssh-ed25519 Aw==\n",
+        )
+        .unwrap();
+        let store = KnownHostsStore::load(&path).unwrap();
+        assert_eq!(store.entries().len(), 1);
+        assert_eq!(store.entries()[0].host, "2001:db8::1");
+        assert_eq!(store.entries()[0].port, 2222);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sha256_fingerprint_uses_openssh_format() {
+        let fingerprint = sha256_fingerprint("AQ==").unwrap();
+        assert!(fingerprint.starts_with("SHA256:"));
+        assert!(!fingerprint.ends_with('='));
+    }
+
+    #[test]
+    fn legacy_debug_key_types_are_normalized_to_openssh_names() {
+        let path = std::env::temp_dir().join(format!(
+            "joyshell-known-hosts-legacy-key-type-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, "example ed25519 AQ==\n").unwrap();
+        let store = KnownHostsStore::load(&path).unwrap();
+        assert_eq!(store.entries()[0].key_type, "ssh-ed25519");
+        assert_eq!(
+            store.check("example", 22, "ssh-ed25519", "AQ=="),
+            HostKeyCheck::Match
+        );
         let _ = std::fs::remove_file(path);
     }
 }

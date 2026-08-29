@@ -11,7 +11,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -19,8 +19,9 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    FileTransferDirection, RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput,
-    TerminalOutputBatch, TransferStatus,
+    sha256_fingerprint, FileTransferDirection, HostKeyCheck, KnownHostsStore,
+    RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput, TerminalOutputBatch,
+    TransferConflictDecision, TransferStatus,
 };
 
 pub type SessionId = Uuid;
@@ -35,7 +36,7 @@ const SSH_HEALTH_FAILURE_LIMIT: u32 = 3;
 const SYSTEM_SYNC_TIMEOUT_MS: u32 = 8_000;
 const SYSTEM_SYNC_MAX_ATTEMPTS: u32 = 2;
 const SFTP_TRANSFER_TIMEOUT_MS: u32 = 60_000;
-const SFTP_TRANSFER_MAX_ATTEMPTS: u32 = 4;
+const SFTP_TRANSFER_MAX_ATTEMPTS: u32 = 5;
 const SFTP_TRANSFER_BACKOFF_MS: u64 = 900;
 const SFTP_TRANSFER_BUFFER_SIZE: usize = 128 * 1024;
 const SFTP_PROGRESS_MIN_INTERVAL_MS: u64 = 120;
@@ -88,6 +89,8 @@ pub struct SessionProfile {
     pub operating_system: Option<String>,
     pub username: String,
     pub auth_method: AuthMethod,
+    #[serde(default)]
+    pub agent_identity_fingerprint: Option<String>,
     pub host_key_policy: HostKeyPolicy,
     pub tags: Vec<String>,
     pub favorite: bool,
@@ -99,9 +102,40 @@ pub struct SessionProfile {
 pub enum ConnectionState {
     Disconnected,
     Connecting,
+    HostKeyPending,
     Connected,
     Reconnecting,
     Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HostKeyPromptReason {
+    Unknown,
+    Changed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HostKeyDecision {
+    Accept,
+    Update,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostKeyPrompt {
+    pub token: Uuid,
+    pub session_id: SessionId,
+    pub profile_id: SessionId,
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub key_base64: String,
+    pub fingerprint: String,
+    pub previous_fingerprint: Option<String>,
+    pub reason: HostKeyPromptReason,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +276,20 @@ pub enum SessionEvent {
     },
     TerminalOutput(TerminalOutput),
     SftpProgress(super::sftp::SftpProgress),
+    HostKeyPrompt(HostKeyPrompt),
+    HostKeyAccepted {
+        session_id: SessionId,
+        host: String,
+        port: u16,
+        fingerprint: String,
+    },
+    HostKeyChanged {
+        session_id: SessionId,
+        host: String,
+        port: u16,
+        previous_fingerprint: String,
+        fingerprint: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -270,6 +318,11 @@ struct SessionRuntime {
 struct SshRuntime {
     control: Sender<SshControl>,
     _thread: JoinHandle<()>,
+}
+
+struct PendingHostKeyPrompt {
+    session_id: SessionId,
+    response: mpsc::Sender<HostKeyDecision>,
 }
 
 enum SshControl {
@@ -319,6 +372,10 @@ pub struct SessionManager {
     events: broadcast::Sender<SessionEvent>,
     cancelled_transfers: Arc<RwLock<HashSet<Uuid>>>,
     paused_transfers: Arc<RwLock<HashSet<Uuid>>>,
+    known_hosts: Option<Arc<StdRwLock<KnownHostsStore>>>,
+    known_hosts_path: Option<Arc<PathBuf>>,
+    pending_host_keys: Arc<RwLock<HashMap<Uuid, PendingHostKeyPrompt>>>,
+    transfer_conflict_decisions: Arc<RwLock<HashMap<Uuid, TransferConflictDecision>>>,
 }
 
 impl Default for SessionManager {
@@ -335,7 +392,47 @@ impl SessionManager {
             events,
             cancelled_transfers: Arc::new(RwLock::new(HashSet::new())),
             paused_transfers: Arc::new(RwLock::new(HashSet::new())),
+            known_hosts: None,
+            known_hosts_path: None,
+            pending_host_keys: Arc::new(RwLock::new(HashMap::new())),
+            transfer_conflict_decisions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_known_hosts(
+        known_hosts: Arc<StdRwLock<KnownHostsStore>>,
+        known_hosts_path: PathBuf,
+    ) -> Self {
+        let mut manager = Self::new();
+        manager.known_hosts = Some(known_hosts);
+        manager.known_hosts_path = Some(Arc::new(known_hosts_path));
+        manager
+    }
+
+    pub fn resolve_host_key_prompt(
+        &self,
+        token: Uuid,
+        session_id: SessionId,
+        decision: HostKeyDecision,
+    ) -> Result<(), SessionError> {
+        let pending = self
+            .pending_host_keys
+            .write()
+            .remove(&token)
+            .ok_or_else(|| {
+                SessionError::ConnectionFailed(
+                    "host key prompt expired or was already resolved".to_string(),
+                )
+            })?;
+        if pending.session_id != session_id {
+            self.pending_host_keys.write().insert(token, pending);
+            return Err(SessionError::ConnectionFailed(
+                "host key prompt belongs to a different session".to_string(),
+            ));
+        }
+        pending.response.send(decision).map_err(|_| {
+            SessionError::ConnectionFailed("host key prompt is no longer active".to_string())
+        })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -444,8 +541,14 @@ impl SessionManager {
 
         let profile_for_connect = profile.clone();
         let credential_for_connect = credential.clone();
+        let manager_for_connect = self.clone();
         let connect_result = tokio::task::spawn_blocking(move || {
-            establish_ssh_session(&profile_for_connect, &credential_for_connect)
+            establish_ssh_session(
+                &manager_for_connect,
+                session_id,
+                &profile_for_connect,
+                &credential_for_connect,
+            )
         })
         .await
         .map_err(|error| SessionError::ConnectionFailed(error.to_string()))?;
@@ -515,6 +618,17 @@ impl SessionManager {
     }
 
     pub async fn disconnect(&self, session_id: SessionId) -> Result<(), SessionError> {
+        let prompt_tokens = self
+            .pending_host_keys
+            .read()
+            .iter()
+            .filter_map(|(token, pending)| (pending.session_id == session_id).then_some(*token))
+            .collect::<Vec<_>>();
+        for token in prompt_tokens {
+            if let Some(pending) = self.pending_host_keys.write().remove(&token) {
+                let _ = pending.response.send(HostKeyDecision::Reject);
+            }
+        }
         let mut sessions = self.sessions.write();
         let runtime = sessions
             .get_mut(&session_id)
@@ -609,8 +723,10 @@ impl SessionManager {
         session_id: SessionId,
     ) -> Result<SystemSnapshot, SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let manager = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (session, wait_socket) = establish_ssh_side_session(&profile, &credential)?;
+            let (session, wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
             let mut socket_waiter = SocketWaiter::new(wait_socket);
             collect_system_snapshot_with_retry(&session, &mut socket_waiter)
         })
@@ -625,8 +741,10 @@ impl SessionManager {
         path: String,
     ) -> Result<RemoteDirectoryListing, SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let manager = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
             list_sftp_directory_from_ssh(&session, &path)
         })
         .await
@@ -640,8 +758,10 @@ impl SessionManager {
         path: String,
     ) -> Result<(), SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let manager = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
             create_sftp_dir_from_ssh(&session, &path)
         })
         .await
@@ -656,8 +776,10 @@ impl SessionManager {
         is_dir: bool,
     ) -> Result<(), SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let manager = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
             delete_sftp_path_from_ssh(&session, &path, is_dir)
         })
         .await
@@ -672,8 +794,10 @@ impl SessionManager {
         to: String,
     ) -> Result<(), SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let manager = self.clone();
         tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
             rename_sftp_path_from_ssh(&session, &from, &to)
         })
         .await
@@ -687,15 +811,18 @@ impl SessionManager {
         transfer_id: Uuid,
         remote_path: String,
         local_path: String,
+        expected: Option<SftpProgress>,
     ) -> Result<SftpProgress, SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
+        let conflict_decision = self.take_transfer_conflict_decision(transfer_id);
         let manager = self.clone();
         let progress_remote_path = remote_path.clone();
         let progress_local_path = local_path.clone();
         let transfer_result = tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)
-                .map_err(|error| SideTransferError::Connect(error.to_string()))?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)
+                    .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             download_sftp_file_from_ssh(
                 &session,
                 session_id,
@@ -703,6 +830,8 @@ impl SessionManager {
                 &remote_path,
                 &local_path,
                 &manager,
+                expected.as_ref(),
+                conflict_decision,
             )
             .map_err(|error| SideTransferError::Transfer(error.to_string()))
         })
@@ -726,6 +855,7 @@ impl SessionManager {
                         .unwrap_or(0),
                     None,
                     reason.clone(),
+                    None,
                 );
                 Err(SessionError::ConnectionFailed(reason))
             }
@@ -739,9 +869,11 @@ impl SessionManager {
         transfer_id: Uuid,
         local_path: String,
         remote_path: String,
+        expected: Option<SftpProgress>,
     ) -> Result<SftpProgress, SessionError> {
         let (profile, credential) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
+        let conflict_decision = self.take_transfer_conflict_decision(transfer_id);
         let manager = self.clone();
         let progress_remote_path = remote_path.clone();
         let progress_local_path = local_path.clone();
@@ -749,8 +881,9 @@ impl SessionManager {
             .ok()
             .map(|metadata| metadata.len());
         let transfer_result = tokio::task::spawn_blocking(move || {
-            let (session, _wait_socket) = establish_ssh_side_session(&profile, &credential)
-                .map_err(|error| SideTransferError::Connect(error.to_string()))?;
+            let (session, _wait_socket) =
+                establish_ssh_side_session(&manager, session_id, &profile, &credential)
+                    .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             upload_sftp_file_from_ssh(
                 &session,
                 session_id,
@@ -758,6 +891,8 @@ impl SessionManager {
                 &local_path,
                 &remote_path,
                 &manager,
+                expected.as_ref(),
+                conflict_decision,
             )
             .map_err(|error| SideTransferError::Transfer(error.to_string()))
         })
@@ -778,6 +913,7 @@ impl SessionManager {
                     0,
                     upload_total,
                     reason.clone(),
+                    None,
                 );
                 Err(SessionError::ConnectionFailed(reason))
             }
@@ -791,6 +927,21 @@ impl SessionManager {
 
     pub fn pause_sftp_transfer(&self, transfer_id: Uuid) {
         self.paused_transfers.write().insert(transfer_id);
+    }
+
+    pub fn resolve_transfer_conflict(&self, transfer_id: Uuid, decision: TransferConflictDecision) {
+        self.transfer_conflict_decisions
+            .write()
+            .insert(transfer_id, decision);
+    }
+
+    fn take_transfer_conflict_decision(
+        &self,
+        transfer_id: Uuid,
+    ) -> Option<TransferConflictDecision> {
+        self.transfer_conflict_decisions
+            .write()
+            .remove(&transfer_id)
     }
 
     fn clear_cancelled_transfer(&self, transfer_id: Uuid) {
@@ -922,29 +1073,169 @@ impl SessionManager {
     }
 
     fn fail_session_for_runtime(&self, session_id: SessionId, runtime_token: Uuid, reason: String) {
-        let should_emit = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+        let reconnect = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
             if runtime.runtime_token != runtime_token {
-                false
+                None
             } else {
-                runtime.info.state = ConnectionState::Failed {
-                    reason: reason.clone(),
-                };
+                let reconnect_token = Uuid::new_v4();
+                runtime.info.state = ConnectionState::Reconnecting;
                 runtime.info.last_seen_at = Utc::now();
                 runtime.ssh = None;
+                runtime.runtime_token = reconnect_token;
+                Some((
+                    reconnect_token,
+                    runtime.profile.clone(),
+                    runtime.credential.clone(),
+                ))
+            }
+        } else {
+            None
+        };
+
+        if let Some((reconnect_token, profile, credential)) = reconnect {
+            let _ = self.events.send(SessionEvent::StateChanged {
+                session_id,
+                state: ConnectionState::Reconnecting,
+            });
+            self.push_output(
+                session_id,
+                format!("\r\nConnection lost: {reason}\r\nReconnecting...\r\n"),
+            );
+            let manager = self.clone();
+            std::thread::spawn(move || {
+                manager.run_reconnect_loop(
+                    session_id,
+                    reconnect_token,
+                    profile,
+                    credential,
+                    reason,
+                );
+            });
+        }
+    }
+
+    fn run_reconnect_loop(
+        &self,
+        session_id: SessionId,
+        reconnect_token: Uuid,
+        profile: SessionProfile,
+        credential: SshCredential,
+        initial_reason: String,
+    ) {
+        let mut last_error = initial_reason;
+        for attempt in 1_u64..=5 {
+            if !self.is_reconnect_active(session_id, reconnect_token) {
+                return;
+            }
+            let jitter_ms = (u64::from(session_id.as_bytes()[0]) + attempt * 37) % 240;
+            std::thread::sleep(Duration::from_millis(
+                (1_u64 << (attempt - 1)) * 1000 + jitter_ms,
+            ));
+            if !self.is_reconnect_active(session_id, reconnect_token) {
+                return;
+            }
+            self.push_output(session_id, format!("Reconnect attempt {attempt}/5...\r\n"));
+            match establish_ssh_session(self, session_id, &profile, &credential) {
+                Ok((session, channel, wait_socket)) => {
+                    if !self.is_reconnect_active(session_id, reconnect_token) {
+                        return;
+                    }
+                    let (control, control_rx) = mpsc::channel();
+                    let next_token = Uuid::new_v4();
+                    let manager = self.clone();
+                    let thread = std::thread::spawn(move || {
+                        run_ssh_session_loop(
+                            session_id,
+                            next_token,
+                            session,
+                            channel,
+                            wait_socket,
+                            control_rx,
+                            manager,
+                        );
+                    });
+                    let connected =
+                        if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+                            if runtime.runtime_token != reconnect_token
+                                || runtime.info.state == ConnectionState::Disconnected
+                            {
+                                false
+                            } else {
+                                runtime.runtime_token = next_token;
+                                runtime.ssh = Some(SshRuntime {
+                                    control,
+                                    _thread: thread,
+                                });
+                                runtime.info.state = ConnectionState::Connected;
+                                runtime.info.connected_at = Some(Utc::now());
+                                runtime.info.last_seen_at = Utc::now();
+                                true
+                            }
+                        } else {
+                            false
+                        };
+                    if connected {
+                        let _ = self.events.send(SessionEvent::StateChanged {
+                            session_id,
+                            state: ConnectionState::Connected,
+                        });
+                        self.push_output(session_id, "Reconnected. Shell ready.\r\n".to_string());
+                    }
+                    return;
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                    if last_error.contains("host key was rejected")
+                        || last_error.contains("host key confirmation timed out")
+                    {
+                        break;
+                    }
+                    if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+                        if runtime.runtime_token == reconnect_token {
+                            runtime.info.state = ConnectionState::Reconnecting;
+                        }
+                    }
+                }
+            }
+        }
+        let failed = if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+            if runtime.runtime_token == reconnect_token
+                && runtime.info.state != ConnectionState::Disconnected
+            {
+                runtime.info.state = ConnectionState::Failed {
+                    reason: last_error.clone(),
+                };
+                runtime.info.last_seen_at = Utc::now();
                 true
+            } else {
+                false
             }
         } else {
             false
         };
-
-        if should_emit {
+        if failed {
             let _ = self.events.send(SessionEvent::StateChanged {
                 session_id,
                 state: ConnectionState::Failed {
-                    reason: reason.clone(),
+                    reason: last_error.clone(),
                 },
             });
+            self.push_output(
+                session_id,
+                format!("Reconnect attempts exhausted: {last_error}\r\n"),
+            );
         }
+    }
+
+    fn is_reconnect_active(&self, session_id: SessionId, reconnect_token: Uuid) -> bool {
+        self.sessions
+            .read()
+            .get(&session_id)
+            .is_some_and(|runtime| {
+                runtime.runtime_token == reconnect_token
+                    && runtime.info.state != ConnectionState::Disconnected
+                    && !matches!(runtime.info.state, ConnectionState::Failed { .. })
+            })
     }
 
     fn disconnect_session_for_runtime(
@@ -1494,11 +1785,14 @@ fn download_sftp_file_from_ssh(
     remote_path: &str,
     local_path: &str,
     manager: &SessionManager,
+    expected: Option<&SftpProgress>,
+    conflict_decision: Option<TransferConflictDecision>,
 ) -> anyhow::Result<SftpProgress> {
     session.set_blocking(true);
     session.set_timeout(SFTP_TRANSFER_TIMEOUT_MS);
     let result: anyhow::Result<SftpProgress> = (|| {
         let remote_path = normalize_remote_path(remote_path);
+        let now = Utc::now().to_rfc3339();
         let mut progress = SftpProgress {
             id: transfer_id,
             session_id,
@@ -1509,10 +1803,23 @@ fn download_sftp_file_from_ssh(
             bytes_done: 0,
             bytes_total: None,
             status: TransferStatus::Running,
+            created_at: expected
+                .and_then(|item| item.created_at.clone())
+                .or_else(|| Some(now.clone())),
+            updated_at: Some(now),
+            retry_count: expected.map(|item| item.retry_count).unwrap_or(0),
+            last_error: expected.and_then(|item| item.last_error.clone()),
+            source_size: None,
+            source_modified_at: None,
+            target_size: std::fs::metadata(local_path)
+                .ok()
+                .map(|metadata| metadata.len()),
+            target_modified_at: file_modified_unix(local_path),
         };
         emit_sftp_progress(manager, &progress);
 
         let mut last_error = None;
+        let mut pending_decision = conflict_decision;
         for attempt in 1..=SFTP_TRANSFER_MAX_ATTEMPTS {
             if attempt > 1 {
                 progress.status = TransferStatus::Retrying {
@@ -1530,21 +1837,80 @@ fn download_sftp_file_from_ssh(
 
             let attempt_result: anyhow::Result<SftpProgress> = (|| {
                 let sftp = session.sftp()?;
-                progress.bytes_total = sftp
-                    .stat(Path::new(&remote_path))
-                    .ok()
-                    .and_then(|stat| stat.size);
+                let remote_stat = sftp.stat(Path::new(&remote_path))?;
+                progress.bytes_total = remote_stat.size;
+                progress.source_size = remote_stat.size;
+                progress.source_modified_at = remote_stat.mtime;
 
                 let local_path_buf = PathBuf::from(local_path);
-                let mut resume_offset = std::fs::metadata(&local_path_buf)
+                let actual_target_size = std::fs::metadata(&local_path_buf)
                     .ok()
                     .map(|metadata| metadata.len())
                     .unwrap_or(0);
-                if let Some(total) = progress.bytes_total {
-                    if resume_offset > total {
-                        resume_offset = 0;
-                    }
+                progress.target_size = Some(actual_target_size);
+                let decision = pending_decision.take();
+                if matches!(decision.as_ref(), Some(TransferConflictDecision::Cancel)) {
+                    progress.status = TransferStatus::Cancelled;
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
                 }
+                let source_changed = expected.is_some_and(|previous| {
+                    previous
+                        .source_size
+                        .is_some_and(|size| remote_stat.size != Some(size))
+                        || previous
+                            .source_modified_at
+                            .is_some_and(|mtime| remote_stat.mtime != Some(mtime))
+                });
+                let offset_changed = expected
+                    .map(|previous| previous.bytes_done != actual_target_size)
+                    .unwrap_or(actual_target_size > 0);
+                let target_exceeds_source = progress
+                    .bytes_total
+                    .is_some_and(|total| actual_target_size > total);
+                if target_exceeds_source
+                    && matches!(decision.as_ref(), Some(TransferConflictDecision::Continue))
+                {
+                    progress.bytes_done = actual_target_size;
+                    progress.status = TransferStatus::NeedsAttention {
+                        reason:
+                            "本地目标文件大于远端源文件，无法从现有断点继续；请重新开始或取消任务"
+                                .to_string(),
+                        expected_size: progress.bytes_total,
+                        actual_size: Some(actual_target_size),
+                    };
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
+                }
+                if attempt == 1
+                    && !matches!(
+                        decision.as_ref(),
+                        Some(
+                            TransferConflictDecision::Restart | TransferConflictDecision::Continue
+                        )
+                    )
+                    && (source_changed || offset_changed || target_exceeds_source)
+                {
+                    progress.bytes_done = actual_target_size;
+                    progress.status = TransferStatus::NeedsAttention {
+                        reason: if source_changed {
+                            "远端源文件已发生变化"
+                        } else {
+                            "本地目标文件与记录的断点不一致"
+                        }
+                        .to_string(),
+                        expected_size: expected.map(|previous| previous.bytes_done),
+                        actual_size: Some(actual_target_size),
+                    };
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
+                }
+                let resume_offset =
+                    if matches!(decision.as_ref(), Some(TransferConflictDecision::Restart)) {
+                        0
+                    } else {
+                        actual_target_size
+                    };
 
                 let mut local = OpenOptions::new()
                     .create(true)
@@ -1649,6 +2015,7 @@ fn download_sftp_file_from_ssh(
             failed_bytes_done,
             failed_bytes_total,
             error.to_string(),
+            expected,
         );
     }
     result
@@ -1661,6 +2028,8 @@ fn upload_sftp_file_from_ssh(
     local_path: &str,
     remote_path: &str,
     manager: &SessionManager,
+    expected: Option<&SftpProgress>,
+    conflict_decision: Option<TransferConflictDecision>,
 ) -> anyhow::Result<SftpProgress> {
     session.set_blocking(true);
     session.set_timeout(SFTP_TRANSFER_TIMEOUT_MS);
@@ -1669,6 +2038,7 @@ fn upload_sftp_file_from_ssh(
         .map(|metadata| metadata.len());
     let result: anyhow::Result<SftpProgress> = (|| {
         let remote_path = normalize_remote_path(remote_path);
+        let now = Utc::now().to_rfc3339();
         let mut progress = SftpProgress {
             id: transfer_id,
             session_id,
@@ -1679,10 +2049,21 @@ fn upload_sftp_file_from_ssh(
             bytes_done: 0,
             bytes_total: upload_total,
             status: TransferStatus::Running,
+            created_at: expected
+                .and_then(|item| item.created_at.clone())
+                .or_else(|| Some(now.clone())),
+            updated_at: Some(now),
+            retry_count: expected.map(|item| item.retry_count).unwrap_or(0),
+            last_error: expected.and_then(|item| item.last_error.clone()),
+            source_size: upload_total,
+            source_modified_at: file_modified_unix(local_path),
+            target_size: None,
+            target_modified_at: None,
         };
         emit_sftp_progress(manager, &progress);
 
         let mut last_error = None;
+        let mut pending_decision = conflict_decision;
         for attempt in 1..=SFTP_TRANSFER_MAX_ATTEMPTS {
             if attempt > 1 {
                 progress.status = TransferStatus::Retrying {
@@ -1701,16 +2082,79 @@ fn upload_sftp_file_from_ssh(
             let attempt_result: anyhow::Result<SftpProgress> = (|| {
                 let mut local = File::open(PathBuf::from(local_path))?;
                 let sftp = session.sftp()?;
-                let mut resume_offset = sftp
-                    .stat(Path::new(&remote_path))
+                let remote_stat = sftp.stat(Path::new(&remote_path)).ok();
+                let actual_target_size =
+                    remote_stat.as_ref().and_then(|stat| stat.size).unwrap_or(0);
+                progress.target_size = Some(actual_target_size);
+                progress.target_modified_at = remote_stat.as_ref().and_then(|stat| stat.mtime);
+                let current_source_size = std::fs::metadata(local_path)
                     .ok()
-                    .and_then(|stat| stat.size)
-                    .unwrap_or(0);
-                if let Some(total) = upload_total {
-                    if resume_offset > total {
-                        resume_offset = 0;
-                    }
+                    .map(|metadata| metadata.len());
+                let current_source_modified = file_modified_unix(local_path);
+                progress.source_size = current_source_size;
+                progress.source_modified_at = current_source_modified;
+                let decision = pending_decision.take();
+                if matches!(decision.as_ref(), Some(TransferConflictDecision::Cancel)) {
+                    progress.status = TransferStatus::Cancelled;
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
                 }
+                let source_changed = expected.is_some_and(|previous| {
+                    previous
+                        .source_size
+                        .is_some_and(|size| current_source_size != Some(size))
+                        || previous
+                            .source_modified_at
+                            .is_some_and(|mtime| current_source_modified != Some(mtime))
+                });
+                let offset_changed = expected
+                    .map(|previous| previous.bytes_done != actual_target_size)
+                    .unwrap_or(actual_target_size > 0);
+                let target_exceeds_source =
+                    upload_total.is_some_and(|total| actual_target_size > total);
+                if target_exceeds_source
+                    && matches!(decision.as_ref(), Some(TransferConflictDecision::Continue))
+                {
+                    progress.bytes_done = actual_target_size;
+                    progress.status = TransferStatus::NeedsAttention {
+                        reason:
+                            "远端目标文件大于本地源文件，无法从现有断点继续；请重新开始或取消任务"
+                                .to_string(),
+                        expected_size: upload_total,
+                        actual_size: Some(actual_target_size),
+                    };
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
+                }
+                if attempt == 1
+                    && !matches!(
+                        decision.as_ref(),
+                        Some(
+                            TransferConflictDecision::Restart | TransferConflictDecision::Continue
+                        )
+                    )
+                    && (source_changed || offset_changed || target_exceeds_source)
+                {
+                    progress.bytes_done = actual_target_size;
+                    progress.status = TransferStatus::NeedsAttention {
+                        reason: if source_changed {
+                            "本地源文件已发生变化"
+                        } else {
+                            "远端目标文件与记录的断点不一致"
+                        }
+                        .to_string(),
+                        expected_size: expected.map(|previous| previous.bytes_done),
+                        actual_size: Some(actual_target_size),
+                    };
+                    emit_sftp_progress(manager, &progress);
+                    return Ok(progress.clone());
+                }
+                let resume_offset =
+                    if matches!(decision.as_ref(), Some(TransferConflictDecision::Restart)) {
+                        0
+                    } else {
+                        actual_target_size
+                    };
 
                 let mut remote = if resume_offset == 0 {
                     sftp.create(Path::new(&remote_path))?
@@ -1809,15 +2253,23 @@ fn upload_sftp_file_from_ssh(
             failed_bytes_done,
             upload_total,
             error.to_string(),
+            expected,
         );
     }
     result
 }
 
 fn emit_sftp_progress(manager: &SessionManager, progress: &SftpProgress) {
-    let _ = manager
-        .events
-        .send(SessionEvent::SftpProgress(progress.clone()));
+    let mut progress = progress.clone();
+    if progress.profile_id.is_none() {
+        progress.profile_id = manager
+            .sessions
+            .read()
+            .get(&progress.session_id)
+            .map(|runtime| runtime.profile.id);
+    }
+    progress.updated_at = Some(Utc::now().to_rfc3339());
+    let _ = manager.events.send(SessionEvent::SftpProgress(progress));
 }
 
 fn maybe_emit_sftp_progress(
@@ -1856,6 +2308,7 @@ fn emit_failed_sftp_progress(
     bytes_done: u64,
     bytes_total: Option<u64>,
     reason: String,
+    expected: Option<&SftpProgress>,
 ) {
     emit_sftp_progress(
         manager,
@@ -1868,9 +2321,35 @@ fn emit_failed_sftp_progress(
             remote_path: remote_path.to_string(),
             bytes_done,
             bytes_total,
-            status: TransferStatus::Failed { reason },
+            status: TransferStatus::Failed {
+                reason: reason.clone(),
+            },
+            created_at: expected
+                .and_then(|item| item.created_at.clone())
+                .or_else(|| Some(Utc::now().to_rfc3339())),
+            updated_at: Some(Utc::now().to_rfc3339()),
+            retry_count: expected
+                .map(|item| item.retry_count.saturating_add(1))
+                .unwrap_or(1),
+            last_error: Some(reason.clone()),
+            source_size: expected.and_then(|item| item.source_size).or(bytes_total),
+            source_modified_at: expected
+                .and_then(|item| item.source_modified_at)
+                .or_else(|| file_modified_unix(local_path)),
+            target_size: Some(bytes_done),
+            target_modified_at: None,
         },
     );
+}
+
+fn file_modified_unix(path: &str) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn remote_entry_from_stat(
@@ -2532,10 +3011,13 @@ impl SocketWaiter {
 }
 
 fn establish_ssh_session(
+    manager: &SessionManager,
+    session_id: SessionId,
     profile: &SessionProfile,
     credential: &SshCredential,
 ) -> Result<(ssh2::Session, ssh2::Channel, TcpStream), anyhow::Error> {
-    let (session, wait_socket) = establish_authenticated_ssh_session(profile, credential)?;
+    let (session, wait_socket) =
+        establish_authenticated_ssh_session(manager, session_id, profile, credential)?;
     let mut channel = session.channel_session().map_err(|error| {
         anyhow::anyhow!(
             "SSH channel open failed for {}@{}:{}: {}",
@@ -2571,16 +3053,21 @@ fn establish_ssh_session(
 }
 
 fn establish_ssh_side_session(
+    manager: &SessionManager,
+    session_id: SessionId,
     profile: &SessionProfile,
     credential: &SshCredential,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
-    let (session, wait_socket) = establish_authenticated_ssh_session(profile, credential)?;
+    let (session, wait_socket) =
+        establish_authenticated_ssh_session(manager, session_id, profile, credential)?;
     wait_socket.set_nonblocking(true)?;
     session.set_blocking(true);
     Ok((session, wait_socket))
 }
 
 fn establish_authenticated_ssh_session(
+    manager: &SessionManager,
+    session_id: SessionId,
     profile: &SessionProfile,
     credential: &SshCredential,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
@@ -2622,6 +3109,7 @@ fn establish_authenticated_ssh_session(
     session
         .handshake()
         .map_err(|error| describe_handshake_error_clean(&profile, &error))?;
+    manager.verify_host_key(session_id, profile, &session)?;
     match credential {
         SshCredential::Password(password) => session
             .userauth_password(&profile.username, password)
@@ -2659,6 +3147,139 @@ fn establish_authenticated_ssh_session(
     session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
 
     Ok((session, wait_socket))
+}
+
+impl SessionManager {
+    fn verify_host_key(
+        &self,
+        session_id: SessionId,
+        profile: &SessionProfile,
+        session: &ssh2::Session,
+    ) -> Result<(), anyhow::Error> {
+        if matches!(profile.host_key_policy, HostKeyPolicy::InsecureAcceptAny) {
+            return Ok(());
+        }
+        let Some(known_hosts) = &self.known_hosts else {
+            return Ok(());
+        };
+        let Some(path) = &self.known_hosts_path else {
+            return Ok(());
+        };
+        let (key, key_type) = session
+            .host_key()
+            .ok_or_else(|| anyhow::anyhow!("server did not provide a host key"))?;
+        let key_base64 = base64::engine::general_purpose::STANDARD.encode(key);
+        let key_type = openssh_host_key_algorithm(key_type)?;
+        let fingerprint = sha256_fingerprint(&key_base64)?;
+        let check = known_hosts
+            .read()
+            .map_err(|_| anyhow::anyhow!("known_hosts is unavailable"))?
+            .check(&profile.host, profile.port, &key_type, &key_base64);
+        let (reason, previous_fingerprint) = match check {
+            HostKeyCheck::Match => return Ok(()),
+            HostKeyCheck::Unknown => (HostKeyPromptReason::Unknown, None),
+            HostKeyCheck::Changed { previous } => (
+                HostKeyPromptReason::Changed,
+                Some(sha256_fingerprint(&previous.key_base64)?),
+            ),
+        };
+        let token = Uuid::new_v4();
+        let created_at = Utc::now();
+        let prompt = HostKeyPrompt {
+            token,
+            session_id,
+            profile_id: profile.id,
+            host: profile.host.clone(),
+            port: profile.port,
+            key_type: key_type.clone(),
+            key_base64: key_base64.clone(),
+            fingerprint: fingerprint.clone(),
+            previous_fingerprint: previous_fingerprint.clone(),
+            reason: reason.clone(),
+            created_at,
+        };
+        let (response, receiver) = mpsc::channel();
+        self.pending_host_keys.write().insert(
+            token,
+            PendingHostKeyPrompt {
+                session_id,
+                response,
+            },
+        );
+        if let Some(runtime) = self.sessions.write().get_mut(&session_id) {
+            runtime.info.state = ConnectionState::HostKeyPending;
+            runtime.info.last_seen_at = Utc::now();
+        }
+        let _ = self.events.send(SessionEvent::StateChanged {
+            session_id,
+            state: ConnectionState::HostKeyPending,
+        });
+        if let Some(previous) = &previous_fingerprint {
+            let _ = self.events.send(SessionEvent::HostKeyChanged {
+                session_id,
+                host: profile.host.clone(),
+                port: profile.port,
+                previous_fingerprint: previous.clone(),
+                fingerprint: fingerprint.clone(),
+            });
+        }
+        let _ = self.events.send(SessionEvent::HostKeyPrompt(prompt));
+        let decision = receiver
+            .recv_timeout(Duration::from_secs(120))
+            .map_err(|_| {
+                self.pending_host_keys.write().remove(&token);
+                anyhow::anyhow!(
+                    "host key confirmation timed out for {}:{} ({})",
+                    profile.host,
+                    profile.port,
+                    fingerprint
+                )
+            })?;
+        self.pending_host_keys.write().remove(&token);
+        let allowed = matches!(
+            (&reason, &decision),
+            (HostKeyPromptReason::Unknown, HostKeyDecision::Accept)
+                | (HostKeyPromptReason::Changed, HostKeyDecision::Update)
+        );
+        if !allowed {
+            anyhow::bail!(
+                "host key was rejected for {}:{} ({}, {})",
+                profile.host,
+                profile.port,
+                key_type,
+                fingerprint
+            );
+        }
+        {
+            let mut store = known_hosts
+                .write()
+                .map_err(|_| anyhow::anyhow!("known_hosts is unavailable"))?;
+            store.accept(&profile.host, profile.port, &key_type, &key_base64);
+            store.save(path.as_ref())?;
+        }
+        let _ = self.events.send(SessionEvent::HostKeyAccepted {
+            session_id,
+            host: profile.host.clone(),
+            port: profile.port,
+            fingerprint,
+        });
+        Ok(())
+    }
+}
+
+fn openssh_host_key_algorithm(key_type: ssh2::HostKeyType) -> anyhow::Result<String> {
+    let algorithm = match key_type {
+        ssh2::HostKeyType::Rsa => "ssh-rsa",
+        ssh2::HostKeyType::Dss => "ssh-dss",
+        ssh2::HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
+        ssh2::HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
+        ssh2::HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
+        ssh2::HostKeyType::Ed25519 => "ssh-ed25519",
+        ssh2::HostKeyType::Unknown => {
+            anyhow::bail!("server returned an unknown host key algorithm")
+        }
+    };
+    Ok(algorithm.to_string())
 }
 
 fn authenticate_with_agent(
@@ -2703,6 +3324,51 @@ fn ssh_agent_identity_fingerprint(identity: &ssh2::PublicKey) -> String {
         "SHA256:{}",
         base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentIdentity {
+    pub fingerprint: String,
+    pub comment: String,
+    pub algorithm: String,
+}
+
+pub fn list_ssh_agent_identities() -> Result<Vec<AgentIdentity>, anyhow::Error> {
+    let session = ssh2::Session::new()
+        .map_err(|error| anyhow::anyhow!("SSH agent initialization failed: {error}"))?;
+    let mut agent = session
+        .agent()
+        .map_err(|error| anyhow::anyhow!("SSH agent is unavailable: {error}"))?;
+    agent
+        .connect()
+        .map_err(|error| anyhow::anyhow!("SSH agent connection failed: {error}"))?;
+    agent
+        .list_identities()
+        .map_err(|error| anyhow::anyhow!("SSH agent key listing failed: {error}"))?;
+    let identities = agent
+        .identities()
+        .map_err(|error| anyhow::anyhow!("SSH agent key listing failed: {error}"))?;
+    Ok(identities
+        .iter()
+        .map(|identity| AgentIdentity {
+            fingerprint: ssh_agent_identity_fingerprint(identity),
+            comment: identity.comment().to_string(),
+            algorithm: public_key_blob_algorithm(identity.blob()),
+        })
+        .collect())
+}
+
+fn public_key_blob_algorithm(blob: &[u8]) -> String {
+    if blob.len() < 4 {
+        return "unknown".to_string();
+    }
+    let length = u32::from_be_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    if length == 0 || blob.len() < 4 + length {
+        return "unknown".to_string();
+    }
+    std::str::from_utf8(&blob[4..4 + length])
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn describe_handshake_error_clean(profile: &SessionProfile, error: &ssh2::Error) -> anyhow::Error {
@@ -2784,6 +3450,7 @@ mod tests {
             auth_method: AuthMethod::Password {
                 secret_ref: "test-secret".to_string(),
             },
+            agent_identity_fingerprint: None,
             host_key_policy: HostKeyPolicy::AcceptNew,
             tags: Vec::new(),
             favorite: false,
@@ -2904,6 +3571,7 @@ CPU part    : 0xd03
                 key_ref: key_path.to_string_lossy().into_owned(),
                 passphrase_ref: None,
             },
+            agent_identity_fingerprint: None,
             host_key_policy: HostKeyPolicy::AcceptNew,
             tags: Vec::new(),
             favorite: false,
@@ -2915,7 +3583,12 @@ CPU part    : 0xd03
             passphrase: None,
         };
 
-        let error = match establish_authenticated_ssh_session(&profile, &credential) {
+        let error = match establish_authenticated_ssh_session(
+            &SessionManager::new(),
+            profile.id,
+            &profile,
+            &credential,
+        ) {
             Ok(_) => panic!("a missing private key must not reach SSH authentication"),
             Err(error) => error,
         };
@@ -2924,5 +3597,82 @@ CPU part    : 0xd03
         assert!(error
             .to_string()
             .contains(&key_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn host_key_prompt_token_is_session_bound_and_single_use() {
+        let manager = SessionManager::new();
+        let token = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let (sender, receiver) = mpsc::channel();
+        manager.pending_host_keys.write().insert(
+            token,
+            PendingHostKeyPrompt {
+                session_id,
+                response: sender,
+            },
+        );
+
+        assert!(manager
+            .resolve_host_key_prompt(token, Uuid::new_v4(), HostKeyDecision::Accept)
+            .is_err());
+        manager
+            .resolve_host_key_prompt(token, session_id, HostKeyDecision::Accept)
+            .expect("correct session resolves prompt");
+        assert_eq!(receiver.recv().unwrap(), HostKeyDecision::Accept);
+        assert!(manager
+            .resolve_host_key_prompt(token, session_id, HostKeyDecision::Accept)
+            .is_err());
+    }
+
+    #[test]
+    fn transfer_conflict_decision_is_consumed_once() {
+        let manager = SessionManager::new();
+        let transfer_id = Uuid::new_v4();
+        manager.resolve_transfer_conflict(transfer_id, TransferConflictDecision::Restart);
+        assert_eq!(
+            manager.take_transfer_conflict_decision(transfer_id),
+            Some(TransferConflictDecision::Restart)
+        );
+        assert_eq!(manager.take_transfer_conflict_decision(transfer_id), None);
+    }
+
+    #[test]
+    fn parses_agent_public_key_blob_algorithm() {
+        let mut blob = vec![0, 0, 0, 11];
+        blob.extend_from_slice(b"ssh-ed25519");
+        assert_eq!(public_key_blob_algorithm(&blob), "ssh-ed25519");
+        assert_eq!(public_key_blob_algorithm(&[0, 1]), "unknown");
+    }
+
+    #[test]
+    fn maps_libssh2_host_key_types_to_openssh_algorithms() {
+        assert_eq!(
+            openssh_host_key_algorithm(ssh2::HostKeyType::Ed25519).unwrap(),
+            "ssh-ed25519"
+        );
+        assert_eq!(
+            openssh_host_key_algorithm(ssh2::HostKeyType::Ecdsa256).unwrap(),
+            "ecdsa-sha2-nistp256"
+        );
+        assert!(openssh_host_key_algorithm(ssh2::HostKeyType::Unknown).is_err());
+    }
+
+    #[test]
+    fn stale_runtime_generation_is_not_active_for_reconnect() {
+        let manager = SessionManager::new();
+        let session_id = Uuid::new_v4();
+        let mut runtime = test_session_runtime(session_id);
+        runtime.info.state = ConnectionState::Reconnecting;
+        let current_token = runtime.runtime_token;
+        manager.sessions.write().insert(session_id, runtime);
+        assert!(manager.is_reconnect_active(session_id, current_token));
+        manager
+            .sessions
+            .write()
+            .get_mut(&session_id)
+            .unwrap()
+            .runtime_token = Uuid::new_v4();
+        assert!(!manager.is_reconnect_active(session_id, current_token));
     }
 }

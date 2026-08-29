@@ -144,9 +144,9 @@ impl ProfileRepository {
                     "
                     insert into session_profiles (
                         id, name, group_name, host, port, latency_probe_host, latency_probe_port, use_terminal_latency_probe, username, auth_method_json,
-                        host_key_policy, tags_json, favorite, sort_order, jump_host_id, operating_system, updated_at
+                        host_key_policy, tags_json, favorite, sort_order, jump_host_id, operating_system, agent_identity_fingerprint, updated_at
                     )
-                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, datetime('now'))
+                    values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, datetime('now'))
                     on conflict(id) do update set
                         name = excluded.name,
                         group_name = excluded.group_name,
@@ -163,6 +163,7 @@ impl ProfileRepository {
                         sort_order = excluded.sort_order,
                         jump_host_id = excluded.jump_host_id,
                         operating_system = excluded.operating_system,
+                        agent_identity_fingerprint = excluded.agent_identity_fingerprint,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -183,6 +184,7 @@ impl ProfileRepository {
                         profile.sort_order,
                         profile.jump_host_id.map(|id| id.to_string()),
                         profile.operating_system,
+                        profile.agent_identity_fingerprint,
                     ],
                 )?;
                 Ok(())
@@ -199,7 +201,7 @@ impl ProfileRepository {
                     "
                     select id, name, group_name, host, port, username, auth_method_json,
                            host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                           latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system
+                           latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system, agent_identity_fingerprint
                     from session_profiles
                     order by favorite desc, coalesce(group_name, ''), sort_order asc, name asc
                     ",
@@ -224,7 +226,7 @@ impl ProfileRepository {
                         "
                         select id, name, group_name, host, port, username, auth_method_json,
                                host_key_policy, tags_json, favorite, sort_order, jump_host_id,
-                               latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system
+                               latency_probe_host, latency_probe_port, use_terminal_latency_probe, operating_system, agent_identity_fingerprint
                         from session_profiles
                         where id = ?1
                         ",
@@ -400,6 +402,28 @@ impl ProfileRepository {
         }
     }
 
+    pub fn get_transfer(&self, id: Uuid) -> rusqlite::Result<Option<SftpProgress>> {
+        match &self.storage {
+            ProfileStorage::Memory { .. } => Ok(None),
+            ProfileStorage::Sqlite { connection } => connection
+                .lock()
+                .query_row(
+                    "select payload, profile_id from transfer_descriptors where id = ?1",
+                    params![id.to_string()],
+                    |row| {
+                        let payload: String = row.get(0)?;
+                        let mut progress: SftpProgress =
+                            serde_json::from_str(&payload).map_err(json_from_sql_error)?;
+                        if progress.profile_id.is_none() {
+                            progress.profile_id = Some(parse_uuid(row.get::<_, String>(1)?)?);
+                        }
+                        Ok(progress)
+                    },
+                )
+                .optional(),
+        }
+    }
+
     pub fn delete_transfer(&self, id: Uuid) -> rusqlite::Result<()> {
         if let ProfileStorage::Sqlite { connection } = &self.storage {
             connection.lock().execute(
@@ -469,6 +493,53 @@ impl ProfileRepository {
                 encrypted
                     .map(|value| decrypt_secret(secret_ref, value, key))
                     .transpose()
+            }
+        }
+    }
+
+    pub fn delete_secret(&self, secret_ref: &str) -> rusqlite::Result<()> {
+        match &self.storage {
+            ProfileStorage::Memory { secrets, .. } => {
+                secrets.write().retain(|item| item.0 != secret_ref);
+            }
+            ProfileStorage::Sqlite { connection } => {
+                connection.lock().execute(
+                    "delete from secret_values where secret_ref = ?1",
+                    params![secret_ref],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn has_stored_secrets(&self) -> rusqlite::Result<bool> {
+        match &self.storage {
+            ProfileStorage::Memory { secrets, .. } => Ok(!secrets.read().is_empty()),
+            ProfileStorage::Sqlite { connection } => connection.lock().query_row(
+                "select exists(select 1 from secret_values limit 1)",
+                [],
+                |row| row.get(0),
+            ),
+        }
+    }
+
+    pub fn list_stored_secret_refs(&self) -> rusqlite::Result<Vec<String>> {
+        match &self.storage {
+            ProfileStorage::Memory { secrets, .. } => {
+                let mut secret_refs = secrets
+                    .read()
+                    .iter()
+                    .map(|(secret_ref, _)| secret_ref.clone())
+                    .collect::<Vec<_>>();
+                secret_refs.sort();
+                Ok(secret_refs)
+            }
+            ProfileStorage::Sqlite { connection } => {
+                let connection = connection.lock();
+                let mut statement = connection
+                    .prepare("select secret_ref from secret_values order by secret_ref")?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                rows.collect()
             }
         }
     }
@@ -882,6 +953,12 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "operating_system",
         "text null",
     )?;
+    ensure_table_column(
+        connection,
+        "session_profiles",
+        "agent_identity_fingerprint",
+        "text null",
+    )?;
 
     Ok(())
 }
@@ -906,6 +983,7 @@ fn read_profile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionProfile>
         username: row.get(5)?,
         auth_method: serde_json::from_str::<AuthMethod>(&auth_method_json)
             .map_err(json_from_sql_error)?,
+        agent_identity_fingerprint: row.get(16)?,
         host_key_policy: serde_json::from_str::<HostKeyPolicy>(&host_key_policy_json)
             .map_err(json_from_sql_error)?,
         tags: serde_json::from_str::<Vec<String>>(&tags_json).map_err(json_from_sql_error)?,
@@ -1067,6 +1145,7 @@ mod tests {
                 auth_method: AuthMethod::Password {
                     secret_ref: "test://password".to_string(),
                 },
+                agent_identity_fingerprint: None,
                 host_key_policy: HostKeyPolicy::AcceptNew,
                 tags: Vec::new(),
                 favorite: false,
@@ -1222,5 +1301,61 @@ mod tests {
         let _ = fs::remove_file(&database_path);
         let _ = fs::remove_file(format!("{}-wal", database_path.display()));
         let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
+
+    #[test]
+    fn loads_legacy_transfer_payload_with_descriptor_defaults() {
+        let database_path =
+            std::env::temp_dir().join(format!("joyshell-legacy-transfer-{}.db", Uuid::new_v4()));
+        let repository = ProfileRepository::sqlite(&database_path).expect("open database");
+        let transfer_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "id": transfer_id,
+            "session_id": profile_id,
+            "profile_id": profile_id,
+            "direction": "Upload",
+            "local_path": "C:/temp/source.bin",
+            "remote_path": "/tmp/source.bin",
+            "bytes_done": 128,
+            "bytes_total": 1024,
+            "status": "Paused"
+        });
+        if let ProfileStorage::Sqlite { connection } = &repository.storage {
+            connection.lock().execute(
+                "insert into transfer_descriptors (id, profile_id, session_id, payload) values (?1, ?2, ?3, ?4)",
+                params![transfer_id.to_string(), profile_id.to_string(), profile_id.to_string(), payload.to_string()],
+            ).unwrap();
+        }
+        let loaded = repository.get_transfer(transfer_id).unwrap().unwrap();
+        assert_eq!(loaded.bytes_done, 128);
+        assert_eq!(loaded.retry_count, 0);
+        assert_eq!(loaded.source_size, None);
+        assert_eq!(loaded.created_at, None);
+        drop(repository);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
+
+    #[test]
+    fn reports_whether_encrypted_fallback_secrets_exist() {
+        let repository = ProfileRepository::memory();
+        assert!(!repository.has_stored_secrets().unwrap());
+        repository
+            .upsert_secret("secret://fallback-b", "value", &[7; 32])
+            .unwrap();
+        repository
+            .upsert_secret("secret://fallback-a", "value", &[7; 32])
+            .unwrap();
+        assert!(repository.has_stored_secrets().unwrap());
+        assert_eq!(
+            repository.list_stored_secret_refs().unwrap(),
+            vec!["secret://fallback-a", "secret://fallback-b"]
+        );
+        repository.delete_secret("secret://fallback-a").unwrap();
+        repository.delete_secret("secret://fallback-b").unwrap();
+        assert!(!repository.has_stored_secrets().unwrap());
+        assert!(repository.list_stored_secret_refs().unwrap().is_empty());
     }
 }

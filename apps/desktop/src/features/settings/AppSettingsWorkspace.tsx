@@ -1,10 +1,11 @@
-import { Palette, X } from "lucide-react";
+import { Palette, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import defaultWorkspaceBackground from "../../assets/backgrounds/default-workspace-bg.jpg";
 import splashCenterImage from "../../assets/splash/center-joy-cropped.png";
 import { CHROME_GRADIENT_PRESETS } from "../../shell/chrome-gradient";
-import type { LayoutSettings } from "../../types";
+import { desktopClient } from "../../platform/desktop-client";
+import type { CredentialStorageStatus, KnownHostEntry, LayoutSettings } from "../../types";
 
 type ImageCropRequest = {
   target: "splash" | "terminal-background";
@@ -33,13 +34,34 @@ export function AppSettingsWorkspace({
   layout,
   onLayoutChange
 }: {
-  activePage: "general" | "appearance";
+  activePage: "general" | "appearance" | "security";
   layout: LayoutSettings;
   onLayoutChange: (patch: Partial<LayoutSettings>) => void;
 }) {
   const splashInputRef = useRef<HTMLInputElement | null>(null);
   const backgroundInputRef = useRef<HTMLInputElement | null>(null);
   const [cropRequest, setCropRequest] = useState<ImageCropRequest | null>(null);
+  const [knownHosts, setKnownHosts] = useState<KnownHostEntry[]>([]);
+  const [credentialStatus, setCredentialStatus] = useState<CredentialStorageStatus | null>(null);
+  const [securityError, setSecurityError] = useState<string | null>(null);
+
+  const refreshSecurity = useCallback(async () => {
+    try {
+      const [hosts, storage] = await Promise.all([
+        desktopClient.listKnownHosts(),
+        desktopClient.getCredentialStorageStatus()
+      ]);
+      setKnownHosts(hosts);
+      setCredentialStatus(storage);
+      setSecurityError(null);
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activePage === "security") void refreshSecurity();
+  }, [activePage, refreshSecurity]);
 
   const chooseSplashImage = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -76,7 +98,7 @@ export function AppSettingsWorkspace({
   return (
         <div className="app-settings-content">
           <header>
-            <span>{activePage === "general" ? "常规" : "外观"}</span>
+            <span>{activePage === "general" ? "常规" : activePage === "appearance" ? "外观" : "安全与信任"}</span>
           </header>
           {activePage === "general" ? (
             <div className="settings-page general-settings-page">
@@ -140,7 +162,7 @@ export function AppSettingsWorkspace({
                 </label>
               </section>
             </div>
-          ) : (
+          ) : activePage === "appearance" ? (
             <div className="settings-page">
               <section>
                 <strong>主题</strong>
@@ -297,6 +319,43 @@ export function AppSettingsWorkspace({
                     onChange={(event) => onLayoutChange({ default_bottom_panel_open: event.target.checked })}
                   />
                 </label>
+              </section>
+            </div>
+          ) : (
+            <div className="settings-page security-settings-page">
+              <section>
+                <strong>凭据存储</strong>
+                <div className="security-status-row">
+                  <ShieldCheck size={18} />
+                  <span>
+                    <b>{credentialStatus?.native ? "系统原生凭据存储" : "本地加密回退"}</b>
+                    <small>{credentialStatus?.backend ?? "正在检测..."}</small>
+                  </span>
+                  <button className="tiny-action" onClick={() => void refreshSecurity()} title="刷新状态"><RefreshCw size={14} /></button>
+                </div>
+                {credentialStatus?.legacy_secrets_pending ? <p className="settings-warning">
+                  发现 {credentialStatus.legacy_secret_count} 条旧版本本地加密凭据，将在下次使用时迁移到系统凭据存储。
+                </p> : null}
+                {credentialStatus && !credentialStatus.native ? <p className="settings-warning">
+                  系统凭据服务不可用；需要保存凭据时将使用 AES-256-GCM 本地加密回退。
+                </p> : null}
+              </section>
+              <section>
+                <strong>已信任主机</strong>
+                {knownHosts.length ? <div className="known-host-list">
+                  {knownHosts.map((entry) => <div className="known-host-row" key={`${entry.host}:${entry.port}:${entry.key_type}`}>
+                    <span><b>{entry.host}:{entry.port}</b><small>{entry.key_type} · {entry.fingerprint}</small></span>
+                    <button className="tiny-action danger" title="删除信任记录" onClick={async () => {
+                      try {
+                        await desktopClient.removeKnownHost(entry.host, entry.port);
+                        await refreshSecurity();
+                      } catch (error) {
+                        setSecurityError(error instanceof Error ? error.message : String(error));
+                      }
+                    }}><Trash2 size={14} /></button>
+                  </div>)}
+                </div> : <p className="settings-empty">尚无已信任主机。</p>}
+                {securityError ? <p className="settings-warning">{securityError}</p> : null}
               </section>
             </div>
           )}

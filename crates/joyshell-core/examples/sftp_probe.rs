@@ -25,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
         auth_method: AuthMethod::Password {
             secret_ref: "env://JOYSHELL_SSH_PASSWORD".to_string(),
         },
+        agent_identity_fingerprint: None,
         host_key_policy: HostKeyPolicy::AcceptNew,
         tags: Vec::new(),
         favorite: false,
@@ -71,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
             Uuid::new_v4(),
             local_upload.to_string_lossy().to_string(),
             remote_file.clone(),
+            None,
         )
         .await?;
     manager
@@ -82,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
             Uuid::new_v4(),
             renamed_file.clone(),
             local_download.to_string_lossy().to_string(),
+            None,
         )
         .await?;
     let downloaded = std::fs::read_to_string(&local_download)?;

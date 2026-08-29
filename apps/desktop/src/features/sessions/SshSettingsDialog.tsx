@@ -1,8 +1,8 @@
-import { Save, Server, ShieldCheck, X } from "lucide-react";
-import { useState } from "react";
+import { RefreshCw, Save, Server, ShieldCheck, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { desktopClient } from "../../platform/desktop-client";
 import type { ProfileSecrets } from "../../platform/runtime-client";
-import type { SessionFolder, SessionProfile } from "../../types";
+import type { AgentIdentity, SessionFolder, SessionProfile } from "../../types";
 
 type SshAuthMethod = "password" | "privateKey" | "agent";
 
@@ -32,12 +32,37 @@ export function SshSettingsDialog({
   const [password, setPassword] = useState("");
   const [privateKeyPath, setPrivateKeyPath] = useState(savedPrivateKey?.key_ref ?? "");
   const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState("");
+  const [agentIdentities, setAgentIdentities] = useState<AgentIdentity[]>([]);
+  const [agentFingerprint, setAgentFingerprint] = useState(profile.agent_identity_fingerprint ?? "");
+  const [agentStatus, setAgentStatus] = useState("选择 Agent 后检测本机密钥");
+  const [agentRefreshing, setAgentRefreshing] = useState(false);
   const [tagsText, setTagsText] = useState(profile.tags.join(", "));
   const [error, setError] = useState<string | null>(null);
 
   const update = (key: keyof SessionProfile, value: string | number | boolean | null) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
+
+  const refreshAgentIdentities = useCallback(async () => {
+    setAgentRefreshing(true);
+    try {
+      const identities = await desktopClient.listSshAgentIdentities();
+      setAgentIdentities(identities);
+      setAgentStatus(identities.length ? `Agent 可用，共 ${identities.length} 个密钥` : "Agent 可用，但没有已加载的密钥");
+      setAgentFingerprint((current) =>
+        current && !identities.some((identity) => identity.fingerprint === current) ? "" : current
+      );
+    } catch (refreshError) {
+      setAgentIdentities([]);
+      setAgentStatus(refreshError instanceof Error ? refreshError.message : String(refreshError));
+    } finally {
+      setAgentRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (authMethod === "agent") void refreshAgentIdentities();
+  }, [authMethod, refreshAgentIdentities]);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -120,6 +145,25 @@ export function SshSettingsDialog({
                 <span>用户名:</span>
                 <input value={draft.username} onChange={(event) => update("username", event.target.value)} />
               </label>
+              {authMethod === "agent" ? (
+                <label className="wide agent-identity-row">
+                  <span>Agent 密钥:</span>
+                  <div className="agent-identity-control">
+                    <select value={agentFingerprint} onChange={(event) => setAgentFingerprint(event.target.value)}>
+                      <option value="">自动尝试全部可用密钥</option>
+                      {agentIdentities.map((identity) => (
+                        <option key={identity.fingerprint} value={identity.fingerprint}>
+                          {identity.comment || identity.algorithm} - {identity.fingerprint}
+                        </option>
+                      ))}
+                    </select>
+                    <button type="button" onClick={() => void refreshAgentIdentities()} disabled={agentRefreshing} title="刷新 Agent 密钥">
+                      <RefreshCw size={15} />
+                    </button>
+                    <small>{agentStatus}</small>
+                  </div>
+                </label>
+              ) : null}
               <label>
                 <span>密码:</span>
                 <input
@@ -206,10 +250,6 @@ export function SshSettingsDialog({
                 setError("端口必须在 1 到 65535 之间");
                 return;
               }
-              if (authMethod === "agent") {
-                setError("SSH Agent 认证尚未接入");
-                return;
-              }
               const cleanPrivateKeyPath = privateKeyPath.trim();
               if (authMethod === "privateKey" && !cleanPrivateKeyPath) {
                 setError("请选择私钥文件");
@@ -222,7 +262,9 @@ export function SshSettingsDialog({
               const passphraseRef = privateKeyPassphrase
                 ? existingPassphraseRef ?? `secret://${draft.id}/private-key-passphrase`
                 : existingPassphraseRef ?? null;
-              const auth_method: SessionProfile["auth_method"] = authMethod === "privateKey"
+              const auth_method: SessionProfile["auth_method"] = authMethod === "agent"
+                ? "Agent"
+                : authMethod === "privateKey"
                 ? {
                     PrivateKey: {
                       key_ref: cleanPrivateKeyPath,
@@ -244,6 +286,7 @@ export function SshSettingsDialog({
                 username: draft.username.trim(),
                 group: draft.group?.trim() || null,
                 auth_method,
+                agent_identity_fingerprint: authMethod === "agent" ? agentFingerprint || null : null,
                 host_key_policy: draft.host_key_policy ?? "AcceptNew",
                 jump_host_id: draft.jump_host_id ?? null,
                 tags: tagsText

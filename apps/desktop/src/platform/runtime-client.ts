@@ -6,6 +6,9 @@ import type {
   AuditEntry,
   CommandSnippet,
   LayoutSettings,
+  AgentIdentity,
+  CredentialStorageStatus,
+  KnownHostEntry,
   RemoteDirectoryListing,
   SessionInfo,
   SessionFolder,
@@ -132,11 +135,37 @@ export async function acceptKnownHost(host: string, port: number, keyType: strin
   }
 }
 
-export async function listKnownHosts(): Promise<Array<{ host: string; port: number; key_type: string; key_base64: string }>> {
+export async function listKnownHosts(): Promise<KnownHostEntry[]> {
   if (canUseTauri) {
     return invoke("list_known_hosts");
   }
   return [];
+}
+
+export async function resolveHostKeyPrompt(token: string, sessionId: string, decision: "accept" | "update" | "reject"): Promise<void> {
+  if (canUseTauri) {
+    await invoke("resolve_host_key_prompt", { token, sessionId, decision });
+  }
+}
+
+export async function listSshAgentIdentities(): Promise<AgentIdentity[]> {
+  if (canUseTauri) {
+    return invoke("list_ssh_agent_identities");
+  }
+  return [];
+}
+
+export async function getCredentialStorageStatus(): Promise<CredentialStorageStatus> {
+  if (canUseTauri) {
+    return invoke("credential_storage_status");
+  }
+  return {
+    backend: "preview",
+    native: false,
+    fallback_active: false,
+    legacy_secrets_pending: false,
+    legacy_secret_count: 0
+  };
 }
 
 export async function removeKnownHost(host: string, port: number): Promise<boolean> {
@@ -162,6 +191,12 @@ export async function saveTransfer(progress: SftpProgress): Promise<void> {
 export async function deleteTransfer(transferId: string): Promise<void> {
   if (canUseTauri) {
     await invoke("delete_transfer", { transferId });
+  }
+}
+
+export async function resolveTransferConflict(transferId: string, decision: "restart" | "continue" | "cancel"): Promise<void> {
+  if (canUseTauri) {
+    await invoke("resolve_transfer_conflict", { transferId, decision });
   }
 }
 

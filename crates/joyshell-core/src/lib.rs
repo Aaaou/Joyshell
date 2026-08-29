@@ -6,13 +6,14 @@ mod terminal;
 pub use known_hosts::{sha256_fingerprint, HostKeyCheck, KnownHostEntry, KnownHostsStore};
 
 pub use session::{
-    AuthMethod, ConnectionState, CpuCoreSample, CpuInfoSample, CpuTimes, FileSystemSample,
-    HostInfoSample, HostKeyPolicy, LoadAverage, MemoryInfoSample, MemorySample,
+    list_ssh_agent_identities, AgentIdentity, AuthMethod, ConnectionState, CpuCoreSample,
+    CpuInfoSample, CpuTimes, FileSystemSample, HostInfoSample, HostKeyDecision, HostKeyPolicy,
+    HostKeyPrompt, HostKeyPromptReason, LoadAverage, MemoryInfoSample, MemorySample,
     NetworkInterfaceSample, ProcessSample, SessionEvent, SessionId, SessionInfo, SessionManager,
     SessionProfile, SshCredential, SshSessionHandle, SystemSnapshot,
 };
 pub use sftp::{
     FileTransferDirection, RemoteDirectoryListing, RemoteFileEntry, SftpOperation, SftpProgress,
-    TransferStatus,
+    TransferConflictDecision, TransferStatus,
 };
 pub use terminal::{TerminalInput, TerminalOutput, TerminalOutputBatch};

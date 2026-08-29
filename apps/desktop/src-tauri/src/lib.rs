@@ -1,11 +1,11 @@
-use base64::Engine;
 use joyshell_agent::{
     AgentToolCall, AgentToolRegistry, AssistantRegistry, ContextBuilder, PermissionEngine,
 };
-use joyshell_core::{sha256_fingerprint, HostKeyCheck, KnownHostsStore};
 use joyshell_core::{
-    AuthMethod, RemoteDirectoryListing, SessionInfo, SessionManager, SessionProfile, SftpProgress,
-    SystemSnapshot, TerminalOutputBatch,
+    list_ssh_agent_identities as enumerate_ssh_agent_identities, sha256_fingerprint, AuthMethod,
+    HostKeyDecision, KnownHostsStore, RemoteDirectoryListing, SessionInfo, SessionManager,
+    SessionProfile, SftpProgress, SystemSnapshot, TerminalOutputBatch, TransferConflictDecision,
+    TransferStatus,
 };
 use joyshell_store::{
     AuditAction, AuditEntry, AuditLog, CommandSnippet, LayoutSettings, MemoryStore,
@@ -58,21 +58,29 @@ struct AppState {
 impl AppState {
     fn new(database_path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let database_path = database_path.as_ref();
+        let known_hosts_path = database_path.with_file_name("known_hosts");
+        let known_hosts = Arc::new(RwLock::new(
+            KnownHostsStore::load(&known_hosts_path).unwrap_or_default(),
+        ));
+        let profiles = ProfileRepository::sqlite(database_path)?;
+        let secret_key = derive_local_secret_key(database_path);
+        let audit = AuditLog::default();
+        migrate_legacy_secrets(&profiles, &secret_key, &audit);
         Ok(Self {
-            profiles: ProfileRepository::sqlite(database_path)?,
-            sessions: SessionManager::new(),
+            profiles,
+            sessions: SessionManager::with_known_hosts(
+                known_hosts.clone(),
+                known_hosts_path.clone(),
+            ),
             assistants: AssistantRegistry::built_in(),
             tools: AgentToolRegistry::built_in(),
             permissions: PermissionEngine::default(),
             memories: MemoryStore::default(),
-            audit: AuditLog::default(),
+            audit,
             secrets: Arc::new(RwLock::new(HashMap::new())),
-            secret_key: derive_local_secret_key(database_path),
-            known_hosts: Arc::new(RwLock::new(
-                KnownHostsStore::load(&database_path.with_file_name("known_hosts"))
-                    .unwrap_or_default(),
-            )),
-            known_hosts_path: database_path.with_file_name("known_hosts"),
+            secret_key,
+            known_hosts,
+            known_hosts_path,
         })
     }
 }
@@ -86,6 +94,56 @@ fn derive_local_secret_key(database_path: &Path) -> [u8; 32] {
     hasher.update(env::var("HOSTNAME").unwrap_or_default().as_bytes());
     hasher.update(database_path.to_string_lossy().as_bytes());
     hasher.finalize().into()
+}
+
+fn native_credential_store_available() -> bool {
+    let Ok(entry) = keyring::Entry::new(
+        "dev.joyshell.desktop",
+        "credential-storage-availability-probe",
+    ) else {
+        return false;
+    };
+    match entry.get_password() {
+        Ok(_) | Err(keyring::Error::NoEntry) => true,
+        Err(_) => false,
+    }
+}
+
+fn migrate_legacy_secrets(
+    profiles: &ProfileRepository,
+    secret_key: &[u8; 32],
+    audit: &AuditLog,
+) -> bool {
+    if !native_credential_store_available() {
+        return false;
+    }
+    let Ok(secret_refs) = profiles.list_stored_secret_refs() else {
+        return true;
+    };
+    for secret_ref in secret_refs {
+        let Ok(Some(value)) = profiles.get_secret(&secret_ref, secret_key) else {
+            continue;
+        };
+        let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", &secret_ref) else {
+            return false;
+        };
+        if entry.set_password(&value).is_err()
+            || !entry.get_password().is_ok_and(|stored| stored == value)
+        {
+            return false;
+        }
+        if profiles.delete_secret(&secret_ref).is_ok() {
+            audit.record(
+                "system",
+                None,
+                AuditAction::SecretAccess,
+                &secret_ref,
+                Some("migrated".to_string()),
+                "migrated encrypted credential to native credential storage",
+            );
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,7 +163,13 @@ fn save_secret(state: &AppState, secret_ref: &str, value: Option<String>) -> Res
         .map_err(|_| "secret store is unavailable".to_string())?
         .insert(secret_ref.to_string(), value.clone());
     if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
-        if entry.set_password(&value).is_ok() {
+        if entry.set_password(&value).is_ok()
+            && entry.get_password().is_ok_and(|stored| stored == value)
+        {
+            state
+                .profiles
+                .delete_secret(secret_ref)
+                .map_err(|error| error.to_string())?;
             return Ok(());
         }
     }
@@ -126,15 +190,20 @@ fn load_secret(state: &AppState, secret_ref: &str) -> Result<Option<String>, Str
         return Ok(cached);
     }
 
-    if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
-        if let Ok(value) = entry.get_password() {
-            state
-                .secrets
-                .write()
-                .map_err(|_| "secret store is unavailable".to_string())?
-                .insert(secret_ref.to_string(), value.clone());
-            return Ok(Some(value));
-        }
+    match keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
+        Ok(entry) => match entry.get_password() {
+            Ok(value) => {
+                state
+                    .secrets
+                    .write()
+                    .map_err(|_| "secret store is unavailable".to_string())?
+                    .insert(secret_ref.to_string(), value.clone());
+                return Ok(Some(value));
+            }
+            Err(keyring::Error::NoEntry) => {}
+            Err(_) => {}
+        },
+        Err(_) => {}
     }
     let stored = state
         .profiles
@@ -142,7 +211,22 @@ fn load_secret(state: &AppState, secret_ref: &str) -> Result<Option<String>, Str
         .map_err(|error| error.to_string())?;
     if let Some(value) = &stored {
         if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
-            let _ = entry.set_password(value);
+            if entry.set_password(value).is_ok()
+                && entry.get_password().is_ok_and(|stored| stored == *value)
+            {
+                state
+                    .profiles
+                    .delete_secret(secret_ref)
+                    .map_err(|error| error.to_string())?;
+                state.audit.record(
+                    "system",
+                    None,
+                    AuditAction::SecretAccess,
+                    secret_ref,
+                    Some("migrated".to_string()),
+                    "migrated encrypted credential to native credential storage",
+                );
+            }
         }
         state
             .secrets
@@ -151,6 +235,112 @@ fn load_secret(state: &AppState, secret_ref: &str) -> Result<Option<String>, Str
             .insert(secret_ref.to_string(), value.clone());
     }
     Ok(stored)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialStorageStatus {
+    backend: &'static str,
+    native: bool,
+    fallback_active: bool,
+    legacy_secrets_pending: bool,
+    legacy_secret_count: usize,
+}
+
+fn classify_credential_storage(
+    native: bool,
+    legacy_secret_count: usize,
+) -> CredentialStorageStatus {
+    CredentialStorageStatus {
+        backend: if native {
+            if cfg!(target_os = "windows") {
+                "windows-credential-manager"
+            } else if cfg!(target_os = "macos") {
+                "macos-keychain"
+            } else {
+                "secret-service"
+            }
+        } else {
+            "local-aes-256-gcm"
+        },
+        native,
+        fallback_active: legacy_secret_count > 0,
+        legacy_secrets_pending: native && legacy_secret_count > 0,
+        legacy_secret_count,
+    }
+}
+
+#[tauri::command]
+fn credential_storage_status(state: State<'_, AppState>) -> CredentialStorageStatus {
+    let native = migrate_legacy_secrets(&state.profiles, &state.secret_key, &state.audit);
+    let legacy_secret_count = state
+        .profiles
+        .list_stored_secret_refs()
+        .map(|secret_refs| secret_refs.len())
+        .unwrap_or(0);
+    classify_credential_storage(native, legacy_secret_count)
+}
+
+#[cfg(test)]
+mod credential_storage_tests {
+    use super::{classify_credential_storage, derive_local_secret_key, AppState};
+    use joyshell_store::ProfileRepository;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn distinguishes_pending_migration_from_native_store_failure() {
+        let pending = classify_credential_storage(true, 2);
+        assert!(pending.native);
+        assert!(pending.fallback_active);
+        assert!(pending.legacy_secrets_pending);
+        assert_eq!(pending.legacy_secret_count, 2);
+
+        let unavailable = classify_credential_storage(false, 2);
+        assert!(!unavailable.native);
+        assert!(unavailable.fallback_active);
+        assert!(!unavailable.legacy_secrets_pending);
+        assert_eq!(unavailable.backend, "local-aes-256-gcm");
+    }
+
+    #[test]
+    fn reports_native_storage_after_migration_completes() {
+        let status = classify_credential_storage(true, 0);
+        assert!(status.native);
+        assert!(!status.fallback_active);
+        assert!(!status.legacy_secrets_pending);
+        assert_eq!(status.legacy_secret_count, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn migrates_legacy_secret_to_windows_credential_manager() {
+        let test_id = Uuid::new_v4();
+        let database_path = std::env::temp_dir().join(format!("joyshell-secret-{test_id}.db"));
+        let secret_ref = format!("secret://credential-migration-test-{test_id}/password");
+        let secret_value = format!("credential-migration-test-value-{test_id}");
+        let secret_key = derive_local_secret_key(&database_path);
+        let repository = ProfileRepository::sqlite(&database_path).unwrap();
+        repository
+            .upsert_secret(&secret_ref, &secret_value, &secret_key)
+            .unwrap();
+        drop(repository);
+
+        let state = AppState::new(&database_path).unwrap();
+        let migration_completed = !state.profiles.has_stored_secrets().unwrap();
+        let native_value_matches = keyring::Entry::new("dev.joyshell.desktop", &secret_ref)
+            .and_then(|entry| entry.get_password())
+            .is_ok_and(|value| value == secret_value);
+
+        if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", &secret_ref) {
+            let _ = entry.delete_credential();
+        }
+        drop(state);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+        assert!(migration_completed);
+        assert!(native_value_matches);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,7 +447,11 @@ async fn connect_profile(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "profile was not found".to_string())?;
     let session_id = session_id.unwrap_or_else(Uuid::new_v4);
-    verify_host_key(&state, &profile)?;
+    let insecure_host_key_policy = matches!(
+        profile.host_key_policy,
+        joyshell_core::HostKeyPolicy::InsecureAcceptAny
+    );
+    let uses_agent = matches!(profile.auth_method, AuthMethod::Agent);
     let handle = match &profile.auth_method {
         AuthMethod::Password { secret_ref } => {
             let password = load_secret(&state, secret_ref)?.ok_or_else(|| {
@@ -289,11 +483,35 @@ async fn connect_profile(
         AuthMethod::Agent => {
             state
                 .sessions
-                .connect_ssh_agent_for_session(profile.clone(), None, session_id)
+                .connect_ssh_agent_for_session(
+                    profile.clone(),
+                    profile.agent_identity_fingerprint.clone(),
+                    session_id,
+                )
                 .await
         }
     }
     .map_err(|error| error.to_string())?;
+    if insecure_host_key_policy {
+        state.audit.record(
+            "system",
+            Some(session_id),
+            AuditAction::SecretAccess,
+            format!("{}:{}", profile.host, profile.port),
+            Some("high-risk".to_string()),
+            "connected with host key verification disabled",
+        );
+    }
+    if uses_agent {
+        state.audit.record(
+            "system",
+            Some(handle.id()),
+            AuditAction::SecretAccess,
+            format!("{}:{}", profile.host, profile.port),
+            Some("allow".to_string()),
+            "authenticated with SSH Agent",
+        );
+    }
     state.audit.record(
         "user",
         Some(handle.id()),
@@ -306,53 +524,6 @@ async fn connect_profile(
         .sessions
         .get_session(handle.id())
         .ok_or_else(|| "session did not start".to_string())
-}
-
-fn verify_host_key(state: &AppState, profile: &SessionProfile) -> Result<(), String> {
-    if matches!(
-        profile.host_key_policy,
-        joyshell_core::HostKeyPolicy::InsecureAcceptAny
-    ) {
-        return Ok(());
-    }
-    let address = format!("{}:{}", profile.host, profile.port);
-    let socket_addr = address
-        .to_socket_addrs()
-        .map_err(|error| error.to_string())?
-        .next()
-        .ok_or_else(|| "host did not resolve".to_string())?;
-    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(8))
-        .map_err(|error| error.to_string())?;
-    let mut session = ssh2::Session::new().map_err(|error| error.to_string())?;
-    session.set_tcp_stream(tcp);
-    session.set_timeout(8000);
-    session.handshake().map_err(|error| error.to_string())?;
-    let (key, key_type) = session
-        .host_key()
-        .ok_or_else(|| "server did not provide a host key".to_string())?;
-    let key_base64 = base64::engine::general_purpose::STANDARD.encode(key);
-    let key_type = format!("{:?}", key_type).to_ascii_lowercase();
-    let fingerprint = sha256_fingerprint(&key_base64).map_err(|error| error.to_string())?;
-    let check = state
-        .known_hosts
-        .read()
-        .map_err(|_| "known_hosts unavailable".to_string())?
-        .check(&profile.host, profile.port, &key_type, &key_base64);
-    match check {
-        HostKeyCheck::Match => Ok(()),
-        HostKeyCheck::Unknown => Err(format!(
-            "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|unknown",
-            profile.host, profile.port, key_type, key_base64, fingerprint
-        )),
-        HostKeyCheck::Changed { previous } => {
-            let previous_fingerprint =
-                sha256_fingerprint(&previous.key_base64).map_err(|error| error.to_string())?;
-            Err(format!(
-                "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|changed|{}",
-                profile.host, profile.port, key_type, key_base64, fingerprint, previous_fingerprint
-            ))
-        }
-    }
 }
 
 #[tauri::command]
@@ -375,14 +546,34 @@ fn accept_known_host(
 }
 
 #[tauri::command]
-fn list_known_hosts(
-    state: State<'_, AppState>,
-) -> Result<Vec<joyshell_core::KnownHostEntry>, String> {
+fn list_known_hosts(state: State<'_, AppState>) -> Result<Vec<KnownHostView>, String> {
     state
         .known_hosts
         .read()
         .map_err(|_| "known_hosts unavailable".to_string())
-        .map(|store| store.entries().to_vec())
+        .and_then(|store| {
+            store
+                .entries()
+                .iter()
+                .map(|entry| {
+                    Ok(KnownHostView {
+                        host: entry.host.clone(),
+                        port: entry.port,
+                        key_type: entry.key_type.clone(),
+                        fingerprint: sha256_fingerprint(&entry.key_base64)
+                            .map_err(|error| error.to_string())?,
+                    })
+                })
+                .collect()
+        })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct KnownHostView {
+    host: String,
+    port: u16,
+    key_type: String,
+    fingerprint: String,
 }
 
 #[tauri::command]
@@ -398,6 +589,34 @@ fn remove_known_host(state: State<'_, AppState>, host: String, port: u16) -> Res
             .map_err(|error| error.to_string())?;
     }
     Ok(removed)
+}
+
+#[tauri::command]
+fn resolve_host_key_prompt(
+    state: State<'_, AppState>,
+    token: Uuid,
+    session_id: Uuid,
+    decision: HostKeyDecision,
+) -> Result<(), String> {
+    let audit_decision = format!("{decision:?}").to_ascii_lowercase();
+    state
+        .sessions
+        .resolve_host_key_prompt(token, session_id, decision)
+        .map_err(|error| error.to_string())?;
+    state.audit.record(
+        "user",
+        Some(session_id),
+        AuditAction::SecretAccess,
+        "SSH host key prompt",
+        Some(audit_decision),
+        "resolved host key confirmation",
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn list_ssh_agent_identities() -> Result<Vec<joyshell_core::AgentIdentity>, String> {
+    enumerate_ssh_agent_identities().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -971,17 +1190,23 @@ async fn sftp_download_file(
             transfer_id,
             remote_path.clone(),
             local_path.clone(),
+            state
+                .profiles
+                .get_transfer(transfer_id)
+                .map_err(|error| error.to_string())?,
         )
         .await
         .map_err(|error| error.to_string())?;
-    state.audit.record(
-        "user",
-        Some(session_id),
-        AuditAction::SftpWrite,
-        remote_path,
-        Some("allow".to_string()),
-        format!("downloaded remote file to {local_path}"),
-    );
+    if matches!(progress.status, TransferStatus::Completed) {
+        state.audit.record(
+            "user",
+            Some(session_id),
+            AuditAction::SftpWrite,
+            format!("transfer {transfer_id}"),
+            Some("allow".to_string()),
+            "download completed",
+        );
+    }
     Ok(progress)
 }
 
@@ -1000,23 +1225,52 @@ async fn sftp_upload_file(
             transfer_id,
             local_path.clone(),
             remote_path.clone(),
+            state
+                .profiles
+                .get_transfer(transfer_id)
+                .map_err(|error| error.to_string())?,
         )
         .await
         .map_err(|error| error.to_string())?;
-    state.audit.record(
-        "user",
-        Some(session_id),
-        AuditAction::SftpWrite,
-        remote_path,
-        Some("allow".to_string()),
-        format!("uploaded local file from {local_path}"),
-    );
+    if matches!(progress.status, TransferStatus::Completed) {
+        state.audit.record(
+            "user",
+            Some(session_id),
+            AuditAction::SftpWrite,
+            format!("transfer {transfer_id}"),
+            Some("allow".to_string()),
+            "upload completed",
+        );
+    }
     Ok(progress)
 }
 
 #[tauri::command]
 fn cancel_sftp_transfer(state: State<'_, AppState>, transfer_id: Uuid) -> Result<(), String> {
     state.sessions.cancel_sftp_transfer(transfer_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn resolve_transfer_conflict(
+    state: State<'_, AppState>,
+    transfer_id: Uuid,
+    decision: TransferConflictDecision,
+) -> Result<(), String> {
+    let transfer = state
+        .profiles
+        .get_transfer(transfer_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "transfer was not found".to_string())?;
+    if !matches!(transfer.status, TransferStatus::NeedsAttention { .. }) {
+        return Err("transfer no longer has an active conflict".to_string());
+    }
+    if matches!(decision, TransferConflictDecision::Cancel) {
+        return Ok(());
+    }
+    state
+        .sessions
+        .resolve_transfer_conflict(transfer_id, decision);
     Ok(())
 }
 
@@ -1174,6 +1428,30 @@ pub fn run() {
                 loop {
                     match events.recv().await {
                         Ok(event) => {
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                if let joyshell_core::SessionEvent::SftpProgress(progress) = &event {
+                                    let _ = state.profiles.upsert_transfer(progress);
+                                }
+                                match &event {
+                                    joyshell_core::SessionEvent::HostKeyAccepted { session_id, host, port, fingerprint } => {
+                                        state.audit.record("user", Some(*session_id), AuditAction::SecretAccess, format!("{host}:{port}"), Some("allow".to_string()), format!("accepted SSH host key {fingerprint}"));
+                                    }
+                                    joyshell_core::SessionEvent::HostKeyChanged { session_id, host, port, previous_fingerprint, fingerprint } => {
+                                        state.audit.record("system", Some(*session_id), AuditAction::SecretAccess, format!("{host}:{port}"), Some("blocked".to_string()), format!("SSH host key changed from {previous_fingerprint} to {fingerprint}"));
+                                    }
+                                    joyshell_core::SessionEvent::SftpProgress(progress) if matches!(progress.status, TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed { .. } | TransferStatus::NeedsAttention { .. }) => {
+                                        let status = match progress.status {
+                                            TransferStatus::Completed => "completed",
+                                            TransferStatus::Cancelled => "cancelled",
+                                            TransferStatus::Failed { .. } => "failed",
+                                            TransferStatus::NeedsAttention { .. } => "needs-attention",
+                                            _ => "updated",
+                                        };
+                                        state.audit.record("system", Some(progress.session_id), AuditAction::SftpWrite, format!("transfer {}", progress.id), Some(status.to_string()), "transfer state changed");
+                                    }
+                                    _ => {}
+                                }
+                            }
                             let _ = app_handle.emit("session:event", event);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1199,6 +1477,9 @@ pub fn run() {
             accept_known_host,
             list_known_hosts,
             remove_known_host,
+            resolve_host_key_prompt,
+            list_ssh_agent_identities,
+            credential_storage_status,
             list_transfers,
             save_transfer,
             delete_transfer,
@@ -1219,6 +1500,7 @@ pub fn run() {
             sftp_download_file,
             sftp_upload_file,
             cancel_sftp_transfer,
+            resolve_transfer_conflict,
             reveal_local_path,
             delete_local_file,
             list_assistants,
