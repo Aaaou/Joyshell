@@ -20,6 +20,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+keyring = "4.1.6"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tokio.workspace = true

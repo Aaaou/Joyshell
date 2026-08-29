@@ -104,6 +104,11 @@ fn save_secret(state: &AppState, secret_ref: &str, value: Option<String>) -> Res
         .write()
         .map_err(|_| "secret store is unavailable".to_string())?
         .insert(secret_ref.to_string(), value.clone());
+    if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
+        if entry.set_password(&value).is_ok() {
+            return Ok(());
+        }
+    }
     state
         .profiles
         .upsert_secret(secret_ref, &value, &state.secret_key)
@@ -121,11 +126,24 @@ fn load_secret(state: &AppState, secret_ref: &str) -> Result<Option<String>, Str
         return Ok(cached);
     }
 
+    if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
+        if let Ok(value) = entry.get_password() {
+            state
+                .secrets
+                .write()
+                .map_err(|_| "secret store is unavailable".to_string())?
+                .insert(secret_ref.to_string(), value.clone());
+            return Ok(Some(value));
+        }
+    }
     let stored = state
         .profiles
         .get_secret(secret_ref, &state.secret_key)
         .map_err(|error| error.to_string())?;
     if let Some(value) = &stored {
+        if let Ok(entry) = keyring::Entry::new("dev.joyshell.desktop", secret_ref) {
+            let _ = entry.set_password(value);
+        }
         state
             .secrets
             .write()
