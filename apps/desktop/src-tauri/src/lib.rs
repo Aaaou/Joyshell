@@ -323,10 +323,14 @@ fn verify_host_key(state: &AppState, profile: &SessionProfile) -> Result<(), Str
             "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|unknown",
             profile.host, profile.port, key_type, key_base64, fingerprint
         )),
-        HostKeyCheck::Changed { .. } => Err(format!(
-            "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|changed",
-            profile.host, profile.port, key_type, key_base64, fingerprint
-        )),
+        HostKeyCheck::Changed { previous } => {
+            let previous_fingerprint =
+                sha256_fingerprint(&previous.key_base64).map_err(|error| error.to_string())?;
+            Err(format!(
+                "HOST_KEY_PROMPT:{}|{}|{}|{}|{}|changed|{}",
+                profile.host, profile.port, key_type, key_base64, fingerprint, previous_fingerprint
+            ))
+        }
     }
 }
 
