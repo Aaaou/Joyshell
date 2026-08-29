@@ -1,6 +1,9 @@
+mod known_hosts;
 mod session;
 mod sftp;
 mod terminal;
+
+pub use known_hosts::{sha256_fingerprint, HostKeyCheck, KnownHostEntry, KnownHostsStore};
 
 pub use session::{
     AuthMethod, ConnectionState, CpuCoreSample, CpuInfoSample, CpuTimes, FileSystemSample,
