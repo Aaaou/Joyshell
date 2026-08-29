@@ -132,6 +132,20 @@ export async function acceptKnownHost(host: string, port: number, keyType: strin
   }
 }
 
+export async function listKnownHosts(): Promise<Array<{ host: string; port: number; key_type: string; key_base64: string }>> {
+  if (canUseTauri) {
+    return invoke("list_known_hosts");
+  }
+  return [];
+}
+
+export async function removeKnownHost(host: string, port: number): Promise<boolean> {
+  if (canUseTauri) {
+    return invoke("remove_known_host", { host, port });
+  }
+  return false;
+}
+
 export async function disconnectProfile(sessionId: string): Promise<void> {
   if (canUseTauri) {
     await invoke("disconnect_profile", { sessionId });

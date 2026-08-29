@@ -1,8 +1,10 @@
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use mio::net::TcpStream as MioTcpStream;
 use mio::{Events, Interest, Poll, Token};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -65,6 +67,9 @@ pub enum SshCredential {
     PrivateKey {
         key_path: PathBuf,
         passphrase: Option<String>,
+    },
+    Agent {
+        identity_fingerprint: Option<String>,
     },
 }
 
@@ -367,6 +372,22 @@ impl SessionManager {
             SshCredential::PrivateKey {
                 key_path,
                 passphrase,
+            },
+            session_id,
+        )
+        .await
+    }
+
+    pub async fn connect_ssh_agent_for_session(
+        &self,
+        profile: SessionProfile,
+        identity_fingerprint: Option<String>,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            SshCredential::Agent {
+                identity_fingerprint,
             },
             session_id,
         )
@@ -2594,6 +2615,9 @@ fn establish_authenticated_ssh_session(
                     error
                 )
             })?,
+        SshCredential::Agent {
+            identity_fingerprint,
+        } => authenticate_with_agent(&session, &profile.username, identity_fingerprint.as_deref())?,
     }
     if !session.authenticated() {
         anyhow::bail!("authentication failed");
@@ -2601,6 +2625,50 @@ fn establish_authenticated_ssh_session(
     session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
 
     Ok((session, wait_socket))
+}
+
+fn authenticate_with_agent(
+    session: &ssh2::Session,
+    username: &str,
+    identity_fingerprint: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let mut agent = session
+        .agent()
+        .map_err(|error| anyhow::anyhow!("SSH agent is unavailable: {error}"))?;
+    agent
+        .connect()
+        .map_err(|error| anyhow::anyhow!("SSH agent connection failed: {error}"))?;
+    agent
+        .list_identities()
+        .map_err(|error| anyhow::anyhow!("SSH agent key listing failed: {error}"))?;
+    let identities = agent
+        .identities()
+        .map_err(|error| anyhow::anyhow!("SSH agent key listing failed: {error}"))?;
+    if identities.is_empty() {
+        anyhow::bail!("SSH agent has no available identities");
+    }
+    let selected = identities.iter().find(|identity| {
+        identity_fingerprint
+            .map(|expected| ssh_agent_identity_fingerprint(identity) == expected)
+            .unwrap_or(true)
+    });
+    let identity = selected.ok_or_else(|| {
+        anyhow::anyhow!(
+            "SSH agent identity was not found: {}",
+            identity_fingerprint.unwrap_or("")
+        )
+    })?;
+    agent
+        .userauth(username, identity)
+        .map_err(|error| anyhow::anyhow!("SSH agent authentication failed: {error}"))
+}
+
+fn ssh_agent_identity_fingerprint(identity: &ssh2::PublicKey) -> String {
+    let digest = sha2::Sha256::digest(identity.blob());
+    format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
+    )
 }
 
 fn describe_handshake_error_clean(profile: &SessionProfile, error: &ssh2::Error) -> anyhow::Error {

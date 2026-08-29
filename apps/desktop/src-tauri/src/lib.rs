@@ -269,7 +269,10 @@ async fn connect_profile(
                 .await
         }
         AuthMethod::Agent => {
-            return Err("SSH agent authentication is not implemented yet".to_string())
+            state
+                .sessions
+                .connect_ssh_agent_for_session(profile.clone(), None, session_id)
+                .await
         }
     }
     .map_err(|error| error.to_string())?;
@@ -351,6 +354,32 @@ fn accept_known_host(
     store
         .save(&state.known_hosts_path)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_known_hosts(
+    state: State<'_, AppState>,
+) -> Result<Vec<joyshell_core::KnownHostEntry>, String> {
+    state
+        .known_hosts
+        .read()
+        .map_err(|_| "known_hosts unavailable".to_string())
+        .map(|store| store.entries().to_vec())
+}
+
+#[tauri::command]
+fn remove_known_host(state: State<'_, AppState>, host: String, port: u16) -> Result<bool, String> {
+    let mut store = state
+        .known_hosts
+        .write()
+        .map_err(|_| "known_hosts unavailable".to_string())?;
+    let removed = store.remove(&host, port);
+    if removed {
+        store
+            .save(&state.known_hosts_path)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -1120,6 +1149,8 @@ pub fn run() {
             save_layout_settings,
             connect_profile,
             accept_known_host,
+            list_known_hosts,
+            remove_known_host,
             disconnect_profile,
             write_terminal,
             session_diagnostics,

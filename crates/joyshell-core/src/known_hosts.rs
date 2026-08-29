@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KnownHostEntry {
     pub host: String,
     pub port: u16,
@@ -82,9 +83,11 @@ impl KnownHostsStore {
         });
     }
 
-    pub fn remove(&mut self, host: &str, port: u16) {
+    pub fn remove(&mut self, host: &str, port: u16) -> bool {
+        let before = self.entries.len();
         self.entries
             .retain(|entry| !(entry.host == host && entry.port == port));
+        self.entries.len() != before
     }
 
     pub fn entries(&self) -> &[KnownHostEntry] {
