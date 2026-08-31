@@ -49,9 +49,16 @@
 
 本次 build 4 在上述基础上包含转发事件按 Profile 归属、运行时与持久化规则合并，以及统一 SSH 连接入口修复。真实 ProxyJump 断网恢复和混合认证验收由发布前实机测试记录补充。
 
+`0.1.69_build_4` 正式安装包（2026-09-01，Windows x64）：
+
+- `Joyshell_0.1.69_build_4_x64-setup.exe`: SHA-256 `FBC8A40EA74AAD33BADBDD67D15C537ED282D3355B51485DB4399D6166F3DBED`
+- `Joyshell_0.1.69_build_4_x64_en-US.msi`: SHA-256 `B061829E79A182E381731DBD2797F77C0CDA93CB9AEC79FA5ECB98A025F20A40`
+
+对应 Git 提交为 `d60bbe9`，Git 标签为 `v0.1.69-build.4`。安装包 Authenticode 状态为 `NotSigned`。
+
 安装包尚未进行 Authenticode 数字签名。开源 Pre-release 可分发未签名包，但 Windows 可能显示未知发布者或 SmartScreen 提示；用户应使用 Release 中的 SHA-256 校验文件。后续签名会改变文件哈希，必须使用新的构建号重新发布。
 
-独立构建序号从 `0.1.69_build_2` 候选起生效，最终发布构建为 `0.1.69_build_3`，详见 [版本与构建编号规则](versioning-and-builds.md)。
+独立构建序号从 `0.1.69_build_2` 候选起生效，本次正式发布构建为 `0.1.69_build_4`，详见 [版本与构建编号规则](versioning-and-builds.md)。
 
 ## 认证组合状态
 
