@@ -586,8 +586,11 @@ export function App() {
 
   const handleForwardingChanged = useCallback((rule: import("../types").ForwardingRule) => {
     setForwardRules((current) => {
-      const active = activeProfileIdRef.current;
-      if (rule.session_id !== active && !current.some((item) => item.id === rule.id)) return current;
+      const activeShellId = activeProfileIdRef.current;
+      const activeProfile = activeShellId
+        ? shellProfileIdsRef.current[activeShellId] ?? activeShellId
+        : null;
+      if (rule.profile_id !== activeProfile && !current.some((item) => item.id === rule.id)) return current;
       return [...current.filter((item) => item.id !== rule.id), rule];
     });
   }, []);

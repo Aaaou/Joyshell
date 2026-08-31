@@ -3880,15 +3880,6 @@ fn establish_ssh_side_session(
     Ok((session, wait_socket))
 }
 
-fn establish_authenticated_ssh_session(
-    manager: &SessionManager,
-    session_id: SessionId,
-    profile: &SessionProfile,
-    credential: &SshCredential,
-) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
-    establish_authenticated_ssh_session_with_jump(manager, session_id, profile, credential, None)
-}
-
 fn establish_authenticated_ssh_session_with_jump(
     manager: &SessionManager,
     session_id: SessionId,
@@ -4578,11 +4569,12 @@ CPU part    : 0xd03
             passphrase: None,
         };
 
-        let error = match establish_authenticated_ssh_session(
+        let error = match establish_authenticated_ssh_session_with_jump(
             &SessionManager::new(),
             profile.id,
             &profile,
             &credential,
+            None,
         ) {
             Ok(_) => panic!("a missing private key must not reach SSH authentication"),
             Err(error) => error,

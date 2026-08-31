@@ -801,10 +801,6 @@ fn stop_port_forward(
 
 #[tauri::command]
 fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<ForwardingRule> {
-    let runtime_rules = state.sessions.list_forwarding_rules(session_id);
-    if !runtime_rules.is_empty() {
-        return runtime_rules;
-    }
     let Some(profile_id) = state
         .sessions
         .get_session(session_id)
@@ -812,7 +808,7 @@ fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<Forwa
     else {
         return Vec::new();
     };
-    state
+    let persistent_rules = state
         .profiles
         .list_forwarding_rules(Some(profile_id))
         .unwrap_or_default()
@@ -831,6 +827,25 @@ fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<Forwa
             }
             rule
         })
+        .collect::<Vec<_>>();
+
+    // Persisted rules provide the complete profile view; runtime rules override
+    // matching records with their current state and supply newly-created rules.
+    let mut order = Vec::new();
+    let mut merged = HashMap::new();
+    for rule in persistent_rules {
+        order.push(rule.id);
+        merged.insert(rule.id, rule);
+    }
+    for rule in state.sessions.list_forwarding_rules(session_id) {
+        if !merged.contains_key(&rule.id) {
+            order.push(rule.id);
+        }
+        merged.insert(rule.id, rule);
+    }
+    order
+        .into_iter()
+        .filter_map(|id| merged.remove(&id))
         .collect()
 }
 

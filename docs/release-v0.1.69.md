@@ -1,8 +1,8 @@
-# Joyshell 0.1.69_build_3
+# Joyshell 0.1.69_build_4
 
 ## Windows 企业网络访问能力
 
-本版本为 Windows x64 Pre-release，是 `v0.1.69` 的企业网络稳定性修复构建：
+本版本为 Windows x64 正式版，是 `v0.1.69` 的企业网络稳定性收口构建：
 
 - 单级 ProxyJump，跳板与目标分别进行认证和主机密钥校验。
 - ProxyJump 意外断线后沿原跳板链路重新校验、认证和连接，不降级为目标直连。
@@ -46,6 +46,8 @@
 - `Joyshell_0.1.69_build_3_x64_en-US.msi`: SHA-256 `003B023B280EEADE52AA17AD11B5B7FDF3AD191EA42AB27C6DBB3136E6D0750C`
 
 两份安装包的 Authenticode 状态均为 `NotSigned`。自动检查已通过：Rust workspace 34 项测试、前端 16 项测试、TypeScript 类型检查、Rust 格式检查、Clippy、生产前端构建和 Windows NSIS/MSI 打包。Git 标签为 `v0.1.69-build.3`；标签所指提交即为本报告对应源码。Windows 产品版本保持 `0.1.69`，应用内标识、Release 标题、Git 标签和安装包文件名使用 `0.1.69_build_3`。
+
+本次 build 4 在上述基础上包含转发事件按 Profile 归属、运行时与持久化规则合并，以及统一 SSH 连接入口修复。真实 ProxyJump 断网恢复和混合认证验收由发布前实机测试记录补充。
 
 安装包尚未进行 Authenticode 数字签名。开源 Pre-release 可分发未签名包，但 Windows 可能显示未知发布者或 SmartScreen 提示；用户应使用 Release 中的 SHA-256 校验文件。后续签名会改变文件哈希，必须使用新的构建号重新发布。
 
