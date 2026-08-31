@@ -20,9 +20,9 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    sha256_fingerprint, FileTransferDirection, ForwardingKind, ForwardingRule, HostKeyCheck,
-    KnownHostsStore, RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput,
-    TerminalOutputBatch, TransferConflictDecision, TransferStatus,
+    sha256_fingerprint, FileTransferDirection, ForwardingDesiredState, ForwardingKind,
+    ForwardingRule, HostKeyCheck, KnownHostsStore, RemoteDirectoryListing, RemoteFileEntry,
+    SftpProgress, TerminalOutput, TerminalOutputBatch, TransferConflictDecision, TransferStatus,
 };
 
 pub type SessionId = Uuid;
@@ -291,6 +291,7 @@ pub enum SessionEvent {
         previous_fingerprint: String,
         fingerprint: String,
     },
+    ForwardingChanged(ForwardingRule),
 }
 
 #[derive(Debug, Error)]
@@ -472,7 +473,7 @@ impl SessionManager {
         mut rule: ForwardingRule,
     ) -> Result<ForwardingRule, SessionError> {
         rule.kind = ForwardingKind::Local;
-        rule.session_id = session_id;
+        self.prepare_forwarding_rule(session_id, &mut rule)?;
         rule.validate().map_err(SessionError::ConnectionFailed)?;
         let (response, receiver) = oneshot::channel();
         let control = self
@@ -481,20 +482,23 @@ impl SessionManager {
             .get(&session_id)
             .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
             .ok_or(SessionError::NotConnected(session_id))?;
+        let failed_rule = rule.clone();
         control
             .send(SshControl::StartLocalForward(rule, response))
             .map_err(|_| {
                 SessionError::ConnectionFailed("SSH control channel is closed".to_string())
             })?;
-        let result = receiver
-            .await
-            .map_err(|_| {
-                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
-            })?
-            .map_err(SessionError::ConnectionFailed)?;
-        self.forwarding_rules
-            .write()
-            .insert(result.id, result.clone());
+        let result = receiver.await.map_err(|_| {
+            SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+        })?;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_forward_start_failure(failed_rule, error.clone());
+                return Err(SessionError::ConnectionFailed(error));
+            }
+        };
+        self.set_forwarding_rule(result.clone());
         Ok(result)
     }
 
@@ -504,7 +508,7 @@ impl SessionManager {
         mut rule: ForwardingRule,
     ) -> Result<ForwardingRule, SessionError> {
         rule.kind = ForwardingKind::Remote;
-        rule.session_id = session_id;
+        self.prepare_forwarding_rule(session_id, &mut rule)?;
         rule.validate().map_err(SessionError::ConnectionFailed)?;
         let (response, receiver) = oneshot::channel();
         let control = self
@@ -513,20 +517,23 @@ impl SessionManager {
             .get(&session_id)
             .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
             .ok_or(SessionError::NotConnected(session_id))?;
+        let failed_rule = rule.clone();
         control
             .send(SshControl::StartRemoteForward(rule, response))
             .map_err(|_| {
                 SessionError::ConnectionFailed("SSH control channel is closed".to_string())
             })?;
-        let result = receiver
-            .await
-            .map_err(|_| {
-                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
-            })?
-            .map_err(SessionError::ConnectionFailed)?;
-        self.forwarding_rules
-            .write()
-            .insert(result.id, result.clone());
+        let result = receiver.await.map_err(|_| {
+            SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+        })?;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_forward_start_failure(failed_rule, error.clone());
+                return Err(SessionError::ConnectionFailed(error));
+            }
+        };
+        self.set_forwarding_rule(result.clone());
         Ok(result)
     }
 
@@ -536,7 +543,7 @@ impl SessionManager {
         mut rule: ForwardingRule,
     ) -> Result<ForwardingRule, SessionError> {
         rule.kind = ForwardingKind::Socks;
-        rule.session_id = session_id;
+        self.prepare_forwarding_rule(session_id, &mut rule)?;
         rule.validate().map_err(SessionError::ConnectionFailed)?;
         let (response, receiver) = oneshot::channel();
         let control = self
@@ -545,21 +552,85 @@ impl SessionManager {
             .get(&session_id)
             .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
             .ok_or(SessionError::NotConnected(session_id))?;
+        let failed_rule = rule.clone();
         control
             .send(SshControl::StartLocalForward(rule, response))
             .map_err(|_| {
                 SessionError::ConnectionFailed("SSH control channel is closed".to_string())
             })?;
-        let result = receiver
-            .await
-            .map_err(|_| {
-                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
-            })?
-            .map_err(SessionError::ConnectionFailed)?;
-        self.forwarding_rules
-            .write()
-            .insert(result.id, result.clone());
+        let result = receiver.await.map_err(|_| {
+            SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+        })?;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_forward_start_failure(failed_rule, error.clone());
+                return Err(SessionError::ConnectionFailed(error));
+            }
+        };
+        self.set_forwarding_rule(result.clone());
         Ok(result)
+    }
+
+    fn prepare_forwarding_rule(
+        &self,
+        session_id: SessionId,
+        rule: &mut ForwardingRule,
+    ) -> Result<(), SessionError> {
+        let profile_id = self
+            .sessions
+            .read()
+            .get(&session_id)
+            .map(|runtime| runtime.info.profile_id)
+            .ok_or(SessionError::NotFound(session_id))?;
+        rule.profile_id = Some(profile_id);
+        rule.session_id = Some(session_id);
+        rule.desired_state = ForwardingDesiredState::Running;
+        rule.state = crate::ForwardingState::Starting;
+        rule.last_error = None;
+        Ok(())
+    }
+
+    fn set_forwarding_rule(&self, rule: ForwardingRule) {
+        self.forwarding_rules.write().insert(rule.id, rule.clone());
+        let _ = self.events.send(SessionEvent::ForwardingChanged(rule));
+    }
+
+    fn record_forward_start_failure(&self, mut rule: ForwardingRule, reason: String) {
+        rule.state = crate::ForwardingState::Failed;
+        rule.last_error = Some(reason);
+        rule.active_connections = 0;
+        self.set_forwarding_rule(rule);
+    }
+
+    fn update_forwarding_connection_count(&self, forwarding_id: Uuid, delta: i32) {
+        let changed = {
+            let mut rules = self.forwarding_rules.write();
+            rules.get_mut(&forwarding_id).map(|rule| {
+                rule.active_connections = if delta >= 0 {
+                    rule.active_connections.saturating_add(delta as u32)
+                } else {
+                    rule.active_connections.saturating_sub(delta.unsigned_abs())
+                };
+                rule.clone()
+            })
+        };
+        if let Some(rule) = changed {
+            let _ = self.events.send(SessionEvent::ForwardingChanged(rule));
+        }
+    }
+
+    fn fail_forwarding_rule(&self, forwarding_id: Uuid, reason: String) {
+        let changed = {
+            let mut rules = self.forwarding_rules.write();
+            rules.get_mut(&forwarding_id).map(|rule| {
+                rule.last_error = Some(reason);
+                rule.clone()
+            })
+        };
+        if let Some(rule) = changed {
+            let _ = self.events.send(SessionEvent::ForwardingChanged(rule));
+        }
     }
 
     pub fn stop_forward(
@@ -567,18 +638,25 @@ impl SessionManager {
         session_id: SessionId,
         forwarding_id: Uuid,
     ) -> Result<(), SessionError> {
-        {
+        let changed = {
             let mut rules = self.forwarding_rules.write();
             if let Some(rule) = rules.get_mut(&forwarding_id) {
-                if rule.session_id != session_id {
+                if rule.session_id != Some(session_id) {
                     return Err(SessionError::ConnectionFailed(
                         "forwarding rule belongs to another session".into(),
                     ));
                 }
                 rule.state = crate::ForwardingState::Stopped;
+                rule.desired_state = ForwardingDesiredState::Stopped;
                 rule.last_error = None;
                 rule.active_connections = 0;
+                Some(rule.clone())
+            } else {
+                None
             }
+        };
+        if let Some(rule) = changed {
+            let _ = self.events.send(SessionEvent::ForwardingChanged(rule));
         }
         let control = self
             .sessions
@@ -597,7 +675,7 @@ impl SessionManager {
         self.forwarding_rules
             .read()
             .values()
-            .filter(|rule| rule.session_id == session_id)
+            .filter(|rule| rule.session_id == Some(session_id))
             .cloned()
             .collect()
     }
@@ -611,7 +689,7 @@ impl SessionManager {
             .forwarding_rules
             .read()
             .get(&forwarding_id)
-            .map(|r| r.session_id == session_id)
+            .map(|r| r.session_id == Some(session_id))
             .unwrap_or(true);
         if !belongs {
             return Err(SessionError::ConnectionFailed(
@@ -1368,17 +1446,20 @@ impl SessionManager {
                 runtime.info.last_seen_at = Utc::now();
                 runtime.ssh = None;
                 runtime.runtime_token = reconnect_token;
+                let reconnecting_rules = self.mark_forwards_reconnecting(session_id);
                 Some((
                     reconnect_token,
                     runtime.profile.clone(),
                     runtime.credential.clone(),
+                    runtime.jump.clone(),
+                    reconnecting_rules,
                 ))
             }
         } else {
             None
         };
 
-        if let Some((reconnect_token, profile, credential)) = reconnect {
+        if let Some((reconnect_token, profile, credential, jump, reconnecting_rules)) = reconnect {
             let _ = self.events.send(SessionEvent::StateChanged {
                 session_id,
                 state: ConnectionState::Reconnecting,
@@ -1394,6 +1475,8 @@ impl SessionManager {
                     reconnect_token,
                     profile,
                     credential,
+                    jump,
+                    reconnecting_rules,
                     reason,
                 );
             });
@@ -1406,6 +1489,8 @@ impl SessionManager {
         reconnect_token: Uuid,
         profile: SessionProfile,
         credential: SshCredential,
+        jump: Option<(SessionProfile, SshCredential)>,
+        reconnecting_rules: Vec<ForwardingRule>,
         initial_reason: String,
     ) {
         let mut last_error = initial_reason;
@@ -1421,7 +1506,7 @@ impl SessionManager {
                 return;
             }
             self.push_output(session_id, format!("Reconnect attempt {attempt}/5...\r\n"));
-            match establish_ssh_session(self, session_id, &profile, &credential, None) {
+            match establish_ssh_session(self, session_id, &profile, &credential, jump.clone()) {
                 Ok((session, channel, wait_socket)) => {
                     if !self.is_reconnect_active(session_id, reconnect_token) {
                         return;
@@ -1466,6 +1551,7 @@ impl SessionManager {
                             state: ConnectionState::Connected,
                         });
                         self.push_output(session_id, "Reconnected. Shell ready.\r\n".to_string());
+                        self.resume_forwards(session_id, reconnecting_rules);
                     }
                     return;
                 }
@@ -1510,6 +1596,53 @@ impl SessionManager {
                 session_id,
                 format!("Reconnect attempts exhausted: {last_error}\r\n"),
             );
+        }
+    }
+
+    fn mark_forwards_reconnecting(&self, session_id: SessionId) -> Vec<ForwardingRule> {
+        let mut rules = self.forwarding_rules.write();
+        let mut reconnecting = Vec::new();
+        for rule in rules.values_mut().filter(|rule| {
+            rule.session_id == Some(session_id)
+                && rule.auto_resume
+                && rule.desired_state == ForwardingDesiredState::Running
+                && matches!(
+                    rule.state,
+                    crate::ForwardingState::Running | crate::ForwardingState::Starting
+                )
+        }) {
+            rule.state = crate::ForwardingState::Reconnecting;
+            rule.active_connections = 0;
+            rule.last_error = None;
+            reconnecting.push(rule.clone());
+            let _ = self
+                .events
+                .send(SessionEvent::ForwardingChanged(rule.clone()));
+        }
+        reconnecting
+    }
+
+    fn resume_forwards(&self, session_id: SessionId, rules: Vec<ForwardingRule>) {
+        for mut rule in rules {
+            if self
+                .forwarding_rules
+                .read()
+                .get(&rule.id)
+                .is_none_or(|current| current.desired_state != ForwardingDesiredState::Running)
+            {
+                continue;
+            }
+            rule.state = crate::ForwardingState::Starting;
+            let manager = self.clone();
+            std::thread::spawn(move || {
+                let result = tauri_block_on_forward(&manager, session_id, rule.clone());
+                if let Err(error) = result {
+                    rule.state = crate::ForwardingState::Failed;
+                    rule.last_error = Some(error.to_string());
+                    rule.active_connections = 0;
+                    manager.set_forwarding_rule(rule);
+                }
+            });
         }
     }
 
@@ -1800,7 +1933,7 @@ fn run_ssh_session_loop(
                 let (target_host, target_port) = if forward.rule.kind == ForwardingKind::Socks {
                     match socks5_handshake(&mut stream) {
                         Ok(target) => target,
-                        Err(_) => {
+                        Err(_error) => {
                             let _ = stream.shutdown(std::net::Shutdown::Both);
                             continue;
                         }
@@ -1821,10 +1954,16 @@ fn run_ssh_session_loop(
                         if forward.rule.kind == ForwardingKind::Socks {
                             let _ = stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
                         }
+                        let manager_for_connection = manager.clone();
+                        manager.update_forwarding_connection_count(forwarding_id, 1);
                         std::thread::spawn(move || {
                             let mut stream_clone = match stream.try_clone() {
                                 Ok(clone) => clone,
-                                Err(_) => return,
+                                Err(_) => {
+                                    manager_for_connection
+                                        .update_forwarding_connection_count(forwarding_id, -1);
+                                    return;
+                                }
                             };
                             let mut channel_clone = channel.clone();
                             let left = std::thread::spawn(move || {
@@ -1832,9 +1971,15 @@ fn run_ssh_session_loop(
                             });
                             copy_with_would_block_retry(&mut channel, &mut stream);
                             let _ = left.join();
+                            manager_for_connection
+                                .update_forwarding_connection_count(forwarding_id, -1);
                         });
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        manager.fail_forwarding_rule(
+                            forwarding_id,
+                            format!("forward target {target_host}:{target_port} failed: {error}"),
+                        );
                         if forward.rule.kind == ForwardingKind::Socks {
                             let _ = stream.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
                         }
@@ -1865,20 +2010,32 @@ fn run_ssh_session_loop(
                 let target_port = forward.rule.target_port.unwrap_or_default();
                 match TcpStream::connect((target_host.as_str(), target_port)) {
                     Ok(mut stream) => {
+                        let manager_for_connection = manager.clone();
+                        manager.update_forwarding_connection_count(forwarding_id, 1);
                         std::thread::spawn(move || {
                             let mut channel_clone = channel.clone();
                             let mut stream_clone = match stream.try_clone() {
                                 Ok(clone) => clone,
-                                Err(_) => return,
+                                Err(_) => {
+                                    manager_for_connection
+                                        .update_forwarding_connection_count(forwarding_id, -1);
+                                    return;
+                                }
                             };
                             let left = std::thread::spawn(move || {
                                 copy_with_would_block_retry(&mut channel_clone, &mut stream_clone);
                             });
                             copy_with_would_block_retry(&mut stream, &mut channel);
                             let _ = left.join();
+                            manager_for_connection
+                                .update_forwarding_connection_count(forwarding_id, -1);
                         });
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        manager.fail_forwarding_rule(
+                            forwarding_id,
+                            format!("forward target {target_host}:{target_port} failed: {error}"),
+                        );
                         let _ = channel.close();
                     }
                 }
@@ -2031,6 +2188,35 @@ fn run_ssh_session_loop(
 
         socket_waiter.wait(&session, Duration::from_millis(10));
     }
+}
+
+fn tauri_block_on_forward(
+    manager: &SessionManager,
+    session_id: SessionId,
+    mut rule: ForwardingRule,
+) -> Result<ForwardingRule, SessionError> {
+    manager.prepare_forwarding_rule(session_id, &mut rule)?;
+    let (response, receiver) = oneshot::channel();
+    let control = manager
+        .sessions
+        .read()
+        .get(&session_id)
+        .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
+        .ok_or(SessionError::NotConnected(session_id))?;
+    let message = if rule.kind == ForwardingKind::Remote {
+        SshControl::StartRemoteForward(rule, response)
+    } else {
+        SshControl::StartLocalForward(rule, response)
+    };
+    control
+        .send(message)
+        .map_err(|_| SessionError::ConnectionFailed("SSH control channel is closed".to_string()))?;
+    let result = receiver
+        .blocking_recv()
+        .map_err(|_| SessionError::ConnectionFailed("forwarding request was cancelled".into()))?
+        .map_err(SessionError::ConnectionFailed)?;
+    manager.set_forwarding_rule(result.clone());
+    Ok(result)
 }
 
 fn cleanup_active_forwards(
@@ -4170,13 +4356,15 @@ mod tests {
         let is_socks = kind == ForwardingKind::Socks;
         ForwardingRule {
             id: Uuid::new_v4(),
-            session_id,
+            profile_id: Some(session_id),
+            session_id: Some(session_id),
             kind,
             listen_host: "127.0.0.1".to_string(),
             listen_port: 28080,
             target_host: (!is_socks).then(|| "127.0.0.1".to_string()),
             target_port: (!is_socks).then_some(18080),
             state: crate::ForwardingState::Stopped,
+            desired_state: ForwardingDesiredState::Stopped,
             last_error: None,
             active_connections: 0,
             auto_resume: true,
@@ -4481,5 +4669,31 @@ CPU part    : 0xd03
             .unwrap()
             .runtime_token = Uuid::new_v4();
         assert!(!manager.is_reconnect_active(session_id, current_token));
+    }
+
+    #[test]
+    fn reconnect_marks_only_running_auto_resume_forwards() {
+        let session_id = Uuid::new_v4();
+        let manager = SessionManager::new();
+        let mut running = forwarding_rule(ForwardingKind::Local, session_id);
+        running.state = crate::ForwardingState::Running;
+        running.desired_state = ForwardingDesiredState::Running;
+        let running_id = running.id;
+        let mut stopped = forwarding_rule(ForwardingKind::Remote, session_id);
+        stopped.state = crate::ForwardingState::Stopped;
+        stopped.desired_state = ForwardingDesiredState::Stopped;
+        let stopped_id = stopped.id;
+        manager.forwarding_rules.write().insert(running_id, running);
+        manager.forwarding_rules.write().insert(stopped_id, stopped);
+
+        let reconnecting = manager.mark_forwards_reconnecting(session_id);
+
+        assert_eq!(reconnecting.len(), 1);
+        assert_eq!(reconnecting[0].id, running_id);
+        assert_eq!(reconnecting[0].state, crate::ForwardingState::Reconnecting);
+        assert_eq!(
+            manager.forwarding_rules.read()[&stopped_id].state,
+            crate::ForwardingState::Stopped
+        );
     }
 }

@@ -439,39 +439,61 @@ impl ProfileRepository {
     pub fn upsert_forwarding_rule(&self, rule: &ForwardingRule) -> rusqlite::Result<()> {
         let payload = serde_json::to_string(rule).map_err(json_to_sql_error)?;
         if let ProfileStorage::Sqlite { connection } = &self.storage {
-            connection.lock().execute("insert into forwarding_rules (id, profile_id, session_id, payload, updated_at) values (?1, ?2, ?3, ?4, datetime('now')) on conflict(id) do update set payload=excluded.payload, updated_at=datetime('now')", params![rule.id.to_string(), rule.session_id.to_string(), rule.session_id.to_string(), payload])?;
+            let profile_id = rule.profile_id.or(rule.session_id).ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName("forwarding profile_id".into())
+            })?;
+            connection.lock().execute("insert into forwarding_rules (id, profile_id, session_id, payload, updated_at) values (?1, ?2, ?3, ?4, datetime('now')) on conflict(id) do update set profile_id=excluded.profile_id, session_id=excluded.session_id, payload=excluded.payload, updated_at=datetime('now')", params![rule.id.to_string(), profile_id.to_string(), rule.session_id.map(|id| id.to_string()), payload])?;
         }
         Ok(())
     }
 
     pub fn list_forwarding_rules(
         &self,
-        session_id: Option<Uuid>,
+        profile_id: Option<Uuid>,
     ) -> rusqlite::Result<Vec<ForwardingRule>> {
         match &self.storage {
             ProfileStorage::Memory { .. } => Ok(Vec::new()),
             ProfileStorage::Sqlite { connection } => {
                 let connection = connection.lock();
-                let mut statement = if session_id.is_some() {
-                    connection.prepare("select payload from forwarding_rules where session_id=?1 order by updated_at desc")?
+                let mut statement = if profile_id.is_some() {
+                    connection.prepare("select payload, profile_id, session_id from forwarding_rules where profile_id=?1 order by updated_at desc")?
                 } else {
                     connection
-                        .prepare("select payload from forwarding_rules order by updated_at desc")?
+                        .prepare("select payload, profile_id, session_id from forwarding_rules order by updated_at desc")?
                 };
                 let mut rules = Vec::new();
-                if let Some(id) = session_id {
-                    let rows = statement.query_map(params![id.to_string()], |row| {
-                        let payload: String = row.get(0)?;
-                        serde_json::from_str(&payload).map_err(json_from_sql_error)
-                    })?;
+                let read_rule = |row: &rusqlite::Row<'_>| {
+                    let payload: String = row.get(0)?;
+                    let mut rule: ForwardingRule =
+                        serde_json::from_str(&payload).map_err(json_from_sql_error)?;
+                    if !payload.contains("\"desired_state\"") {
+                        rule.desired_state = if rule.auto_resume
+                            && matches!(
+                                rule.state,
+                                joyshell_core::ForwardingState::Running
+                                    | joyshell_core::ForwardingState::Starting
+                                    | joyshell_core::ForwardingState::Reconnecting
+                            ) {
+                            joyshell_core::ForwardingDesiredState::Running
+                        } else {
+                            joyshell_core::ForwardingDesiredState::Stopped
+                        };
+                    }
+                    if rule.profile_id.is_none() {
+                        rule.profile_id = Some(parse_uuid(row.get::<_, String>(1)?)?);
+                    }
+                    let stored_session: Option<String> = row.get(2)?;
+                    rule.session_id = stored_session.map(parse_uuid).transpose()?;
+                    Ok(rule)
+                };
+                if let Some(id) = profile_id {
+                    let rows =
+                        statement.query_map(params![id.to_string()], |row| read_rule(row))?;
                     for row in rows {
                         rules.push(row?);
                     }
                 } else {
-                    let rows = statement.query_map([], |row| {
-                        let payload: String = row.get(0)?;
-                        serde_json::from_str(&payload).map_err(json_from_sql_error)
-                    })?;
+                    let rows = statement.query_map([], |row| read_rule(row))?;
                     for row in rows {
                         rules.push(row?);
                     }
@@ -869,7 +891,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         create table if not exists forwarding_rules (
             id text primary key,
             profile_id text not null,
-            session_id text not null,
+            session_id text null,
             payload text not null,
             updated_at text not null default (datetime('now'))
         );
@@ -994,6 +1016,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "sort_order",
         "integer not null default 0",
     )?;
+    migrate_forwarding_session_nullable(connection)?;
     ensure_table_column(
         connection,
         "session_profiles",
@@ -1025,6 +1048,40 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "text null",
     )?;
 
+    Ok(())
+}
+
+fn migrate_forwarding_session_nullable(connection: &Connection) -> rusqlite::Result<()> {
+    let session_not_null = {
+        let mut statement = connection.prepare("pragma table_info(forwarding_rules)")?;
+        let columns = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut result = false;
+        for column in columns {
+            let (name, not_null) = column?;
+            if name == "session_id" {
+                result = not_null != 0;
+            }
+        }
+        result
+    };
+    if session_not_null {
+        connection.execute_batch(
+            "begin;
+             alter table forwarding_rules rename to forwarding_rules_legacy;
+             create table forwarding_rules (
+                 id text primary key,
+                 profile_id text not null,
+                 session_id text null,
+                 payload text not null,
+                 updated_at text not null default (datetime('now'))
+             );
+             insert into forwarding_rules select id, profile_id, session_id, payload, updated_at from forwarding_rules_legacy;
+             drop table forwarding_rules_legacy;
+             commit;",
+        )?;
+    }
     Ok(())
 }
 
@@ -1171,13 +1228,15 @@ mod tests {
         let other_session_id = Uuid::new_v4();
         let mut rule = ForwardingRule {
             id: Uuid::new_v4(),
-            session_id,
+            profile_id: Some(session_id),
+            session_id: Some(session_id),
             kind: ForwardingKind::Local,
             listen_host: "127.0.0.1".to_string(),
             listen_port: 28080,
             target_host: Some("127.0.0.1".to_string()),
             target_port: Some(18080),
             state: ForwardingState::Running,
+            desired_state: joyshell_core::ForwardingDesiredState::Running,
             last_error: None,
             active_connections: 1,
             auto_resume: true,

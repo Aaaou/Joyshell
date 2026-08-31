@@ -23,15 +23,31 @@ pub enum ForwardingState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardingDesiredState {
+    Stopped,
+    Running,
+}
+
+fn default_desired_state() -> ForwardingDesiredState {
+    ForwardingDesiredState::Stopped
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForwardingRule {
     pub id: Uuid,
-    pub session_id: SessionId,
+    #[serde(default)]
+    pub profile_id: Option<SessionId>,
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
     pub kind: ForwardingKind,
     pub listen_host: String,
     pub listen_port: u16,
     pub target_host: Option<String>,
     pub target_port: Option<u16>,
     pub state: ForwardingState,
+    #[serde(default = "default_desired_state")]
+    pub desired_state: ForwardingDesiredState,
     pub last_error: Option<String>,
     pub active_connections: u32,
     pub auto_resume: bool,
@@ -84,13 +100,15 @@ mod tests {
     fn rule(kind: ForwardingKind) -> ForwardingRule {
         ForwardingRule {
             id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
+            profile_id: Some(Uuid::new_v4()),
+            session_id: Some(Uuid::new_v4()),
             kind,
             listen_host: "127.0.0.1".to_string(),
             listen_port: 18080,
             target_host: Some("10.0.0.5".to_string()),
             target_port: Some(8080),
             state: ForwardingState::Stopped,
+            desired_state: ForwardingDesiredState::Stopped,
             last_error: None,
             active_connections: 0,
             auto_resume: true,

@@ -114,6 +114,7 @@ export type ForwardingKind = "local" | "remote" | "socks";
 export type ForwardingState = "stopped" | "starting" | "running" | "reconnecting" | "failed";
 export type ForwardingRule = {
   id: string;
+  profile_id: string;
   session_id: string;
   kind: ForwardingKind;
   listen_host: string;
@@ -121,6 +122,7 @@ export type ForwardingRule = {
   target_host?: string | null;
   target_port?: number | null;
   state: ForwardingState;
+  desired_state: "stopped" | "running";
   last_error?: string | null;
   active_connections: number;
   auto_resume: boolean;

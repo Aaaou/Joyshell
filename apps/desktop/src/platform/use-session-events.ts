@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
-import type { HostKeyPrompt, SessionInfo, SftpProgress, TerminalOutput } from "../types";
+import type { ForwardingRule, HostKeyPrompt, SessionInfo, SftpProgress, TerminalOutput } from "../types";
 import type { SessionEvent } from "../shared/events/session-events";
 import { isDesktopRuntime } from "./desktop-client";
 
@@ -9,9 +9,10 @@ export type SessionEventHandlers = {
   onTerminalOutput: (output: TerminalOutput) => void;
   onSftpProgress: (progress: SftpProgress) => void;
   onHostKeyPrompt: (prompt: HostKeyPrompt) => void;
+  onForwardingChanged: (rule: ForwardingRule) => void;
 };
 
-export function useSessionEvents({ onStateChanged, onTerminalOutput, onSftpProgress, onHostKeyPrompt }: SessionEventHandlers) {
+export function useSessionEvents({ onStateChanged, onTerminalOutput, onSftpProgress, onHostKeyPrompt, onForwardingChanged }: SessionEventHandlers) {
   useEffect(() => {
     if (!isDesktopRuntime) {
       return;
@@ -31,6 +32,10 @@ export function useSessionEvents({ onStateChanged, onTerminalOutput, onSftpProgr
         onSftpProgress(payload.SftpProgress);
         return;
       }
+      if ("ForwardingChanged" in payload) {
+        onForwardingChanged(payload.ForwardingChanged);
+        return;
+      }
       if ("HostKeyPrompt" in payload) {
         onHostKeyPrompt(payload.HostKeyPrompt);
       }
@@ -40,5 +45,5 @@ export function useSessionEvents({ onStateChanged, onTerminalOutput, onSftpProgr
     return () => {
       unlisten?.();
     };
-  }, [onHostKeyPrompt, onSftpProgress, onStateChanged, onTerminalOutput]);
+  }, [onForwardingChanged, onHostKeyPrompt, onSftpProgress, onStateChanged, onTerminalOutput]);
 }

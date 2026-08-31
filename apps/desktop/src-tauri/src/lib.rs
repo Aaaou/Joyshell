@@ -805,12 +805,21 @@ fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<Forwa
     if !runtime_rules.is_empty() {
         return runtime_rules;
     }
+    let Some(profile_id) = state
+        .sessions
+        .get_session(session_id)
+        .map(|session| session.profile_id)
+    else {
+        return Vec::new();
+    };
     state
         .profiles
-        .list_forwarding_rules(Some(session_id))
+        .list_forwarding_rules(Some(profile_id))
         .unwrap_or_default()
         .into_iter()
         .map(|mut rule| {
+            rule.profile_id = Some(profile_id);
+            rule.session_id = Some(session_id);
             if matches!(
                 rule.state,
                 ForwardingState::Running
@@ -819,7 +828,6 @@ fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<Forwa
             ) {
                 rule.state = ForwardingState::Stopped;
                 rule.active_connections = 0;
-                let _ = state.profiles.upsert_forwarding_rule(&rule);
             }
             rule
         })
@@ -1755,6 +1763,9 @@ pub fn run() {
                             if let Some(state) = app_handle.try_state::<AppState>() {
                                 if let joyshell_core::SessionEvent::SftpProgress(progress) = &event {
                                     let _ = state.profiles.upsert_transfer(progress);
+                                }
+                                if let joyshell_core::SessionEvent::ForwardingChanged(rule) = &event {
+                                    let _ = state.profiles.upsert_forwarding_rule(rule);
                                 }
                                 match &event {
                                     joyshell_core::SessionEvent::HostKeyAccepted { session_id, host, port, fingerprint } => {

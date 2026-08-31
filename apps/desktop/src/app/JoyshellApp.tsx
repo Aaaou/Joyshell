@@ -101,7 +101,14 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.69";
+const clientBuildLabel = "0.1.69_build_3";
+const forwardingStateLabel: Record<import("../types").ForwardingState, string> = {
+  starting: "启动中",
+  running: "运行中",
+  reconnecting: "重连中",
+  stopped: "已停止",
+  failed: "失败"
+};
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -577,6 +584,14 @@ export function App() {
     setHostKeyPrompts((current) => enqueueHostKeyPrompt(current, prompt));
   }, []);
 
+  const handleForwardingChanged = useCallback((rule: import("../types").ForwardingRule) => {
+    setForwardRules((current) => {
+      const active = activeProfileIdRef.current;
+      if (rule.session_id !== active && !current.some((item) => item.id === rule.id)) return current;
+      return [...current.filter((item) => item.id !== rule.id), rule];
+    });
+  }, []);
+
   const hostKeyPrompt = hostKeyPrompts[0] ?? null;
 
   const resolveCurrentHostKeyPrompt = useCallback(async (accepted: boolean) => {
@@ -600,7 +615,8 @@ export function App() {
     onStateChanged: handleSessionStateChanged,
     onTerminalOutput: handleTerminalOutput,
     onSftpProgress: upsertTransfer,
-    onHostKeyPrompt: handleHostKeyPrompt
+    onHostKeyPrompt: handleHostKeyPrompt,
+    onForwardingChanged: handleForwardingChanged
   });
   const activeShellProfileId = activeProfileId
     ? shellProfileIds[activeProfileId] ?? activeProfileId
@@ -621,7 +637,7 @@ export function App() {
   const createForwardRule = useCallback(async () => {
     if (!activeSession || forwardBusy) return;
     setForwardBusy(true);
-    const rule = { id: crypto.randomUUID(), session_id: activeSession.id, kind: forwardKind, listen_host: forwardListenHost || "127.0.0.1", listen_port: forwardListenPort, target_host: forwardKind === "socks" ? null : forwardTargetHost, target_port: forwardKind === "socks" ? null : forwardTargetPort, state: "stopped" as const, last_error: null, active_connections: 0, auto_resume: true };
+    const rule = { id: crypto.randomUUID(), profile_id: activeSession.profile_id, session_id: activeSession.id, kind: forwardKind, listen_host: forwardListenHost || "127.0.0.1", listen_port: forwardListenPort, target_host: forwardKind === "socks" ? null : forwardTargetHost, target_port: forwardKind === "socks" ? null : forwardTargetPort, state: "stopped" as const, desired_state: "running" as const, last_error: null, active_connections: 0, auto_resume: true };
     try {
       const started = forwardKind === "local" ? await startLocalForward(activeSession.id, rule) : forwardKind === "remote" ? await startRemoteForward(activeSession.id, rule) : await startSocksForward(activeSession.id, rule);
       await savePortForward(started);
@@ -631,14 +647,14 @@ export function App() {
   }, [activeSession, forwardBusy, forwardKind, forwardListenHost, forwardListenPort, forwardTargetHost, forwardTargetPort, flash]);
 
   const resumeForwardRule = useCallback(async (rule: import("../types").ForwardingRule) => {
-    if (forwardBusy) return;
+    if (!activeSession || forwardBusy || rule.profile_id !== activeSession.profile_id) return;
     setForwardBusy(true);
     try {
       const started = rule.kind === "local"
-        ? await startLocalForward(rule.session_id, rule)
+        ? await startLocalForward(activeSession.id, rule)
         : rule.kind === "remote"
-          ? await startRemoteForward(rule.session_id, rule)
-          : await startSocksForward(rule.session_id, rule);
+          ? await startRemoteForward(activeSession.id, rule)
+          : await startSocksForward(activeSession.id, rule);
       await savePortForward(started);
       setForwardRules((current) => current.map((item) => item.id === started.id ? started : item));
     } catch (error) {
@@ -646,7 +662,7 @@ export function App() {
     } finally {
       setForwardBusy(false);
     }
-  }, [flash, forwardBusy]);
+  }, [activeSession, flash, forwardBusy]);
 
   const selectedRemoteEntry = useMemo(
     () => sftpListing?.entries.find((entry) => entry.path === selectedRemotePath) ?? null,
@@ -3219,7 +3235,7 @@ export function App() {
                   {forwardKind !== "socks" ? <div className="forwarding-endpoint-group"><div className="forwarding-group-title">目标端点</div><div className="forwarding-endpoint"><label className="forwarding-field"><span>地址</span><input value={forwardTargetHost} onChange={(event) => setForwardTargetHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="forwarding-field port"><span>端口</span><input type="number" min={1} max={65535} value={forwardTargetPort} onChange={(event) => setForwardTargetPort(Number(event.target.value))} /></label></div></div> : <p className="forwarding-note">SOCKS5 客户端连接时再指定目标地址，仅支持 TCP CONNECT。</p>}
                   <button className="forwarding-start" onClick={() => void createForwardRule()} disabled={!activeSession || forwardBusy}><Plus size={14} />{forwardBusy ? "启动中..." : "启动转发"}</button>
                 </div>
-                {forwardRules.length === 0 ? <p className="muted">暂无转发规则。</p> : forwardRules.map((rule) => <div className="forwarding-row" key={rule.id}><span>{rule.kind.toUpperCase()} {rule.listen_host}:{rule.listen_port}</span><small>{rule.state} · {rule.active_connections}</small>{rule.state === "stopped" || rule.state === "failed" ? <button title="继续转发" onClick={() => { void resumeForwardRule(rule); }} disabled={forwardBusy}><Play size={13} /></button> : <button title="停止" onClick={() => { void stopPortForward(rule.session_id, rule.id).then(() => listPortForwards(rule.session_id).then(setForwardRules)); }} disabled={forwardBusy}><Square size={13} /></button>}<button title="删除" onClick={() => { void removePortForward(rule.session_id, rule.id).then(() => setForwardRules((current) => current.filter((item) => item.id !== rule.id))); }}><Trash2 size={13} /></button></div>)}
+                {forwardRules.length === 0 ? <p className="muted">暂无转发规则。</p> : forwardRules.map((rule) => <div className="forwarding-row" key={rule.id} title={rule.last_error ?? undefined}><span>{rule.kind.toUpperCase()} {rule.listen_host}:{rule.listen_port}</span><small>{forwardingStateLabel[rule.state]} · {rule.active_connections}{rule.last_error ? ` · ${rule.last_error}` : ""}</small>{rule.state === "stopped" || rule.state === "failed" ? <button title="继续转发" onClick={() => { void resumeForwardRule(rule); }} disabled={forwardBusy}><Play size={13} /></button> : <button title="停止" onClick={() => { void stopPortForward(rule.session_id, rule.id).then(() => listPortForwards(rule.session_id).then(setForwardRules)); }} disabled={forwardBusy}><Square size={13} /></button>}<button title="删除" onClick={() => { void removePortForward(rule.session_id, rule.id).then(() => setForwardRules((current) => current.filter((item) => item.id !== rule.id))); }}><Trash2 size={13} /></button></div>)}
               </div> : null}
               {lanScanRequested && lanScanOpen ? <div className="focused-tool lan-device-results">
               <div className="lan-detail-heading"><button className="lan-back-button" onClick={() => { setLanScanOpen(false); setSelectedLanDevice(null); }}>‹ 网络工具</button><strong>内网设备扫描</strong><span /></div>
