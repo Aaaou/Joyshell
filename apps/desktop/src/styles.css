@@ -2851,6 +2851,30 @@ button {
   flex: 0 0 auto;
 }
 
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tool-card {
+  min-height: 86px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+}
+
+.tool-card small { color: var(--muted); font-size: 11px; }
+.focused-tool { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+
 .assistant-research-panel {
   margin-top: auto;
   padding: 10px 0 0;
@@ -2976,6 +3000,8 @@ button {
   color: var(--text);
   text-align: left;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .context-menu button svg {

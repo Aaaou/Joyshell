@@ -110,6 +110,22 @@ export type CredentialStorageStatus = {
   legacy_secret_count: number;
 };
 
+export type ForwardingKind = "local" | "remote" | "socks";
+export type ForwardingState = "stopped" | "starting" | "running" | "reconnecting" | "failed";
+export type ForwardingRule = {
+  id: string;
+  session_id: string;
+  kind: ForwardingKind;
+  listen_host: string;
+  listen_port: number;
+  target_host?: string | null;
+  target_port?: number | null;
+  state: ForwardingState;
+  last_error?: string | null;
+  active_connections: number;
+  auto_resume: boolean;
+};
+
 export type TerminalOutput = {
   session_id: string;
   data: string;

@@ -9,11 +9,13 @@ type SshAuthMethod = "password" | "privateKey" | "agent";
 export function SshSettingsDialog({
   profile,
   folders,
+  profiles,
   onClose,
   onSave
 }: {
   profile: SessionProfile;
   folders: SessionFolder[];
+  profiles: SessionProfile[];
   onClose: () => void;
   onSave: (profile: SessionProfile, secrets?: ProfileSecrets) => void;
 }) {
@@ -225,9 +227,21 @@ export function SshSettingsDialog({
                 />
                 <span>使用终端交互平均时延</span>
               </label>
-              <label className="check-row">
-                <input type="checkbox" disabled />
-                <span>跳板机 / 代理链预留</span>
+              <label>
+                <span>跳板机:</span>
+                <select
+                  value={draft.jump_host_id ?? ""}
+                  onChange={(event) => update("jump_host_id", event.target.value || null)}
+                >
+                  <option value="">不使用跳板机</option>
+                  {profiles
+                    .filter((candidate) => candidate.id !== draft.id && !candidate.jump_host_id)
+                    .map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.name} ({candidate.host}:{candidate.port})
+                      </option>
+                    ))}
+                </select>
               </label>
               <label className="check-row">
                 <input type="checkbox" defaultChecked />

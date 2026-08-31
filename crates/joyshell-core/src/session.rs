@@ -8,8 +8,9 @@ use sha2::Digest;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread::JoinHandle;
@@ -19,9 +20,9 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    sha256_fingerprint, FileTransferDirection, HostKeyCheck, KnownHostsStore,
-    RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput, TerminalOutputBatch,
-    TransferConflictDecision, TransferStatus,
+    sha256_fingerprint, FileTransferDirection, ForwardingKind, ForwardingRule, HostKeyCheck,
+    KnownHostsStore, RemoteDirectoryListing, RemoteFileEntry, SftpProgress, TerminalOutput,
+    TerminalOutputBatch, TransferConflictDecision, TransferStatus,
 };
 
 pub type SessionId = Uuid;
@@ -306,6 +307,7 @@ struct SessionRuntime {
     info: SessionInfo,
     profile: SessionProfile,
     credential: SshCredential,
+    jump: Option<(SessionProfile, SshCredential)>,
     output_tail: VecDeque<TerminalOutput>,
     next_output_sequence: u64,
     ssh: Option<SshRuntime>,
@@ -320,6 +322,18 @@ struct SshRuntime {
     _thread: JoinHandle<()>,
 }
 
+struct ActiveForward {
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    rule: ForwardingRule,
+}
+
+struct ActiveRemoteForward {
+    listener: ssh2::Listener,
+    stop: Arc<AtomicBool>,
+    rule: ForwardingRule,
+}
+
 struct PendingHostKeyPrompt {
     session_id: SessionId,
     response: mpsc::Sender<HostKeyDecision>,
@@ -328,6 +342,15 @@ struct PendingHostKeyPrompt {
 enum SshControl {
     Terminal(Vec<u8>),
     MeasureLatency(oneshot::Sender<Result<Option<f64>, String>>),
+    StartLocalForward(
+        ForwardingRule,
+        oneshot::Sender<Result<ForwardingRule, String>>,
+    ),
+    StartRemoteForward(
+        ForwardingRule,
+        oneshot::Sender<Result<ForwardingRule, String>>,
+    ),
+    StopForward(Uuid),
 }
 
 struct PendingHealthProbe {
@@ -376,6 +399,8 @@ pub struct SessionManager {
     known_hosts_path: Option<Arc<PathBuf>>,
     pending_host_keys: Arc<RwLock<HashMap<Uuid, PendingHostKeyPrompt>>>,
     transfer_conflict_decisions: Arc<RwLock<HashMap<Uuid, TransferConflictDecision>>>,
+    forwarding_stops: Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>,
+    forwarding_rules: Arc<RwLock<HashMap<Uuid, ForwardingRule>>>,
 }
 
 impl Default for SessionManager {
@@ -396,6 +421,8 @@ impl SessionManager {
             known_hosts_path: None,
             pending_host_keys: Arc::new(RwLock::new(HashMap::new())),
             transfer_conflict_decisions: Arc::new(RwLock::new(HashMap::new())),
+            forwarding_stops: Arc::new(RwLock::new(HashMap::new())),
+            forwarding_rules: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -439,13 +466,170 @@ impl SessionManager {
         self.events.subscribe()
     }
 
+    pub async fn start_local_forward(
+        &self,
+        session_id: SessionId,
+        mut rule: ForwardingRule,
+    ) -> Result<ForwardingRule, SessionError> {
+        rule.kind = ForwardingKind::Local;
+        rule.session_id = session_id;
+        rule.validate().map_err(SessionError::ConnectionFailed)?;
+        let (response, receiver) = oneshot::channel();
+        let control = self
+            .sessions
+            .read()
+            .get(&session_id)
+            .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
+            .ok_or(SessionError::NotConnected(session_id))?;
+        control
+            .send(SshControl::StartLocalForward(rule, response))
+            .map_err(|_| {
+                SessionError::ConnectionFailed("SSH control channel is closed".to_string())
+            })?;
+        let result = receiver
+            .await
+            .map_err(|_| {
+                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+            })?
+            .map_err(SessionError::ConnectionFailed)?;
+        self.forwarding_rules
+            .write()
+            .insert(result.id, result.clone());
+        Ok(result)
+    }
+
+    pub async fn start_remote_forward(
+        &self,
+        session_id: SessionId,
+        mut rule: ForwardingRule,
+    ) -> Result<ForwardingRule, SessionError> {
+        rule.kind = ForwardingKind::Remote;
+        rule.session_id = session_id;
+        rule.validate().map_err(SessionError::ConnectionFailed)?;
+        let (response, receiver) = oneshot::channel();
+        let control = self
+            .sessions
+            .read()
+            .get(&session_id)
+            .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
+            .ok_or(SessionError::NotConnected(session_id))?;
+        control
+            .send(SshControl::StartRemoteForward(rule, response))
+            .map_err(|_| {
+                SessionError::ConnectionFailed("SSH control channel is closed".to_string())
+            })?;
+        let result = receiver
+            .await
+            .map_err(|_| {
+                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+            })?
+            .map_err(SessionError::ConnectionFailed)?;
+        self.forwarding_rules
+            .write()
+            .insert(result.id, result.clone());
+        Ok(result)
+    }
+
+    pub async fn start_socks_forward(
+        &self,
+        session_id: SessionId,
+        mut rule: ForwardingRule,
+    ) -> Result<ForwardingRule, SessionError> {
+        rule.kind = ForwardingKind::Socks;
+        rule.session_id = session_id;
+        rule.validate().map_err(SessionError::ConnectionFailed)?;
+        let (response, receiver) = oneshot::channel();
+        let control = self
+            .sessions
+            .read()
+            .get(&session_id)
+            .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
+            .ok_or(SessionError::NotConnected(session_id))?;
+        control
+            .send(SshControl::StartLocalForward(rule, response))
+            .map_err(|_| {
+                SessionError::ConnectionFailed("SSH control channel is closed".to_string())
+            })?;
+        let result = receiver
+            .await
+            .map_err(|_| {
+                SessionError::ConnectionFailed("forwarding request was cancelled".to_string())
+            })?
+            .map_err(SessionError::ConnectionFailed)?;
+        self.forwarding_rules
+            .write()
+            .insert(result.id, result.clone());
+        Ok(result)
+    }
+
+    pub fn stop_forward(
+        &self,
+        session_id: SessionId,
+        forwarding_id: Uuid,
+    ) -> Result<(), SessionError> {
+        {
+            let mut rules = self.forwarding_rules.write();
+            if let Some(rule) = rules.get_mut(&forwarding_id) {
+                if rule.session_id != session_id {
+                    return Err(SessionError::ConnectionFailed(
+                        "forwarding rule belongs to another session".into(),
+                    ));
+                }
+                rule.state = crate::ForwardingState::Stopped;
+                rule.last_error = None;
+                rule.active_connections = 0;
+            }
+        }
+        let control = self
+            .sessions
+            .read()
+            .get(&session_id)
+            .and_then(|runtime| runtime.ssh.as_ref().map(|ssh| ssh.control.clone()))
+            .ok_or(SessionError::NotConnected(session_id))?;
+        control
+            .send(SshControl::StopForward(forwarding_id))
+            .map_err(|_| {
+                SessionError::ConnectionFailed("SSH control channel is closed".to_string())
+            })
+    }
+
+    pub fn list_forwarding_rules(&self, session_id: SessionId) -> Vec<ForwardingRule> {
+        self.forwarding_rules
+            .read()
+            .values()
+            .filter(|rule| rule.session_id == session_id)
+            .cloned()
+            .collect()
+    }
+
+    pub fn remove_forwarding_rule(
+        &self,
+        session_id: SessionId,
+        forwarding_id: Uuid,
+    ) -> Result<(), SessionError> {
+        let belongs = self
+            .forwarding_rules
+            .read()
+            .get(&forwarding_id)
+            .map(|r| r.session_id == session_id)
+            .unwrap_or(true);
+        if !belongs {
+            return Err(SessionError::ConnectionFailed(
+                "forwarding rule belongs to another session".into(),
+            ));
+        }
+        let _ = self.stop_forward(session_id, forwarding_id);
+        self.forwarding_rules.write().remove(&forwarding_id);
+        Ok(())
+    }
+
     pub async fn connect_ssh_password(
         &self,
         profile: SessionProfile,
         password: String,
     ) -> Result<SshSessionHandle, SessionError> {
         let session_id = profile.id;
-        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id)
+        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id, None)
             .await
     }
 
@@ -455,7 +639,7 @@ impl SessionManager {
         password: String,
         session_id: SessionId,
     ) -> Result<SshSessionHandle, SessionError> {
-        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id)
+        self.connect_ssh_for_session(profile, SshCredential::Password(password), session_id, None)
             .await
     }
 
@@ -473,6 +657,7 @@ impl SessionManager {
                 passphrase,
             },
             session_id,
+            None,
         )
         .await
     }
@@ -489,6 +674,93 @@ impl SessionManager {
                 identity_fingerprint,
             },
             session_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_ssh_password_via_jump_for_session(
+        &self,
+        profile: SessionProfile,
+        password: String,
+        jump_profile: SessionProfile,
+        jump_password: String,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            SshCredential::Password(password),
+            session_id,
+            Some((jump_profile, SshCredential::Password(jump_password))),
+        )
+        .await
+    }
+
+    pub async fn connect_ssh_private_key_via_jump_for_session(
+        &self,
+        profile: SessionProfile,
+        key_path: PathBuf,
+        passphrase: Option<String>,
+        jump_profile: SessionProfile,
+        jump_key_path: PathBuf,
+        jump_passphrase: Option<String>,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            SshCredential::PrivateKey {
+                key_path,
+                passphrase,
+            },
+            session_id,
+            Some((
+                jump_profile,
+                SshCredential::PrivateKey {
+                    key_path: jump_key_path,
+                    passphrase: jump_passphrase,
+                },
+            )),
+        )
+        .await
+    }
+
+    pub async fn connect_ssh_agent_via_jump_for_session(
+        &self,
+        profile: SessionProfile,
+        identity_fingerprint: Option<String>,
+        jump_profile: SessionProfile,
+        jump_identity_fingerprint: Option<String>,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            SshCredential::Agent {
+                identity_fingerprint,
+            },
+            session_id,
+            Some((
+                jump_profile,
+                SshCredential::Agent {
+                    identity_fingerprint: jump_identity_fingerprint,
+                },
+            )),
+        )
+        .await
+    }
+
+    pub async fn connect_ssh_with_jump_for_session(
+        &self,
+        profile: SessionProfile,
+        credential: SshCredential,
+        jump_profile: SessionProfile,
+        jump_credential: SshCredential,
+        session_id: SessionId,
+    ) -> Result<SshSessionHandle, SessionError> {
+        self.connect_ssh_for_session(
+            profile,
+            credential,
+            session_id,
+            Some((jump_profile, jump_credential)),
         )
         .await
     }
@@ -498,6 +770,7 @@ impl SessionManager {
         profile: SessionProfile,
         credential: SshCredential,
         session_id: SessionId,
+        jump: Option<(SessionProfile, SshCredential)>,
     ) -> Result<SshSessionHandle, SessionError> {
         let now = Utc::now();
         let connecting_info = SessionInfo {
@@ -518,6 +791,7 @@ impl SessionManager {
                 info: connecting_info,
                 profile: profile.clone(),
                 credential: credential.clone(),
+                jump: jump.clone(),
                 output_tail: VecDeque::new(),
                 next_output_sequence: 0,
                 ssh: None,
@@ -548,6 +822,7 @@ impl SessionManager {
                 session_id,
                 &profile_for_connect,
                 &credential_for_connect,
+                jump,
             )
         })
         .await
@@ -722,11 +997,11 @@ impl SessionManager {
         &self,
         session_id: SessionId,
     ) -> Result<SystemSnapshot, SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         let manager = self.clone();
         tokio::task::spawn_blocking(move || {
             let (session, wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)?;
             let mut socket_waiter = SocketWaiter::new(wait_socket);
             collect_system_snapshot_with_retry(&session, &mut socket_waiter)
         })
@@ -740,11 +1015,11 @@ impl SessionManager {
         session_id: SessionId,
         path: String,
     ) -> Result<RemoteDirectoryListing, SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         let manager = self.clone();
         tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)?;
             list_sftp_directory_from_ssh(&session, &path)
         })
         .await
@@ -757,11 +1032,11 @@ impl SessionManager {
         session_id: SessionId,
         path: String,
     ) -> Result<(), SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         let manager = self.clone();
         tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)?;
             create_sftp_dir_from_ssh(&session, &path)
         })
         .await
@@ -775,11 +1050,11 @@ impl SessionManager {
         path: String,
         is_dir: bool,
     ) -> Result<(), SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         let manager = self.clone();
         tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)?;
             delete_sftp_path_from_ssh(&session, &path, is_dir)
         })
         .await
@@ -793,11 +1068,11 @@ impl SessionManager {
         from: String,
         to: String,
     ) -> Result<(), SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         let manager = self.clone();
         tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)?;
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)?;
             rename_sftp_path_from_ssh(&session, &from, &to)
         })
         .await
@@ -813,7 +1088,7 @@ impl SessionManager {
         local_path: String,
         expected: Option<SftpProgress>,
     ) -> Result<SftpProgress, SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
         let conflict_decision = self.take_transfer_conflict_decision(transfer_id);
         let manager = self.clone();
@@ -821,7 +1096,7 @@ impl SessionManager {
         let progress_local_path = local_path.clone();
         let transfer_result = tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)
                     .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             download_sftp_file_from_ssh(
                 &session,
@@ -871,7 +1146,7 @@ impl SessionManager {
         remote_path: String,
         expected: Option<SftpProgress>,
     ) -> Result<SftpProgress, SessionError> {
-        let (profile, credential) = self.side_connection_credentials(session_id)?;
+        let (profile, credential, jump) = self.side_connection_credentials(session_id)?;
         self.clear_cancelled_transfer(transfer_id);
         let conflict_decision = self.take_transfer_conflict_decision(transfer_id);
         let manager = self.clone();
@@ -882,7 +1157,7 @@ impl SessionManager {
             .map(|metadata| metadata.len());
         let transfer_result = tokio::task::spawn_blocking(move || {
             let (session, _wait_socket) =
-                establish_ssh_side_session(&manager, session_id, &profile, &credential)
+                establish_ssh_side_session(&manager, session_id, &profile, &credential, jump)
                     .map_err(|error| SideTransferError::Connect(error.to_string()))?;
             upload_sftp_file_from_ssh(
                 &session,
@@ -960,7 +1235,14 @@ impl SessionManager {
     fn side_connection_credentials(
         &self,
         session_id: SessionId,
-    ) -> Result<(SessionProfile, SshCredential), SessionError> {
+    ) -> Result<
+        (
+            SessionProfile,
+            SshCredential,
+            Option<(SessionProfile, SshCredential)>,
+        ),
+        SessionError,
+    > {
         let sessions = self.sessions.read();
         let runtime = sessions
             .get(&session_id)
@@ -968,7 +1250,11 @@ impl SessionManager {
         if runtime.info.state != ConnectionState::Connected || runtime.ssh.is_none() {
             return Err(SessionError::NotConnected(session_id));
         }
-        Ok((runtime.profile.clone(), runtime.credential.clone()))
+        Ok((
+            runtime.profile.clone(),
+            runtime.credential.clone(),
+            runtime.jump.clone(),
+        ))
     }
 
     pub fn session_diagnostics(&self, session_id: SessionId) -> Result<String, SessionError> {
@@ -1135,7 +1421,7 @@ impl SessionManager {
                 return;
             }
             self.push_output(session_id, format!("Reconnect attempt {attempt}/5...\r\n"));
-            match establish_ssh_session(self, session_id, &profile, &credential) {
+            match establish_ssh_session(self, session_id, &profile, &credential, None) {
                 Ok((session, channel, wait_socket)) => {
                     if !self.is_reconnect_active(session_id, reconnect_token) {
                         return;
@@ -1370,6 +1656,8 @@ fn run_ssh_session_loop(
     let mut health_probe: Option<PendingHealthProbe> = None;
     let mut health_failures = 0;
     let mut next_health_probe_at = Instant::now() + Duration::from_secs(SSH_HEALTH_INTERVAL_SECS);
+    let mut active_forwards: HashMap<Uuid, ActiveForward> = HashMap::new();
+    let mut active_remote_forwards: HashMap<Uuid, ActiveRemoteForward> = HashMap::new();
 
     loop {
         loop {
@@ -1387,8 +1675,213 @@ fn run_ssh_session_loop(
                         });
                     }
                 }
+                Ok(SshControl::StartLocalForward(mut rule, response)) => {
+                    if let Some(existing) = active_forwards.get(&rule.id) {
+                        let _ = response.send(Ok(existing.rule.clone()));
+                        continue;
+                    }
+                    let bind_address = format!("{}:{}", rule.listen_host, rule.listen_port);
+                    match TcpListener::bind(&bind_address) {
+                        Ok(listener) => {
+                            if let Err(error) = listener.set_nonblocking(true) {
+                                let _ = response
+                                    .send(Err(format!("forward listener setup failed: {error}")));
+                                continue;
+                            }
+                            let actual_port = listener
+                                .local_addr()
+                                .map(|addr| addr.port())
+                                .unwrap_or(rule.listen_port);
+                            rule.listen_port = actual_port;
+                            rule.state = crate::ForwardingState::Running;
+                            let stop = Arc::new(AtomicBool::new(false));
+                            manager
+                                .forwarding_stops
+                                .write()
+                                .insert(rule.id, stop.clone());
+                            active_forwards.insert(
+                                rule.id,
+                                ActiveForward {
+                                    listener,
+                                    stop,
+                                    rule: rule.clone(),
+                                },
+                            );
+                            let _ = response.send(Ok(rule));
+                        }
+                        Err(error) => {
+                            let _ = response.send(Err(format!(
+                                "forward listener bind failed on {bind_address}: {error}"
+                            )));
+                        }
+                    }
+                }
+                Ok(SshControl::StopForward(forwarding_id)) => {
+                    if let Some(forward) = active_forwards.remove(&forwarding_id) {
+                        forward.stop.store(true, Ordering::Relaxed);
+                        manager.forwarding_stops.write().remove(&forwarding_id);
+                    }
+                    if let Some(forward) = active_remote_forwards.remove(&forwarding_id) {
+                        forward.stop.store(true, Ordering::Relaxed);
+                        manager.forwarding_stops.write().remove(&forwarding_id);
+                    }
+                }
+                Ok(SshControl::StartRemoteForward(mut rule, response)) => {
+                    if let Some(existing) = active_remote_forwards.get(&rule.id) {
+                        let _ = response.send(Ok(existing.rule.clone()));
+                        continue;
+                    }
+                    let host = rule.listen_host.clone();
+                    let mut listen_result =
+                        session.channel_forward_listen(rule.listen_port, Some(&host), Some(64));
+                    for _ in 0..40 {
+                        let Err(error) = &listen_result else {
+                            break;
+                        };
+                        if !is_transient_ssh2_error(error) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                        listen_result =
+                            session.channel_forward_listen(rule.listen_port, Some(&host), Some(64));
+                    }
+                    match listen_result {
+                        Ok((listener, actual_port)) => {
+                            rule.listen_port = actual_port;
+                            rule.state = crate::ForwardingState::Running;
+                            let stop = Arc::new(AtomicBool::new(false));
+                            manager
+                                .forwarding_stops
+                                .write()
+                                .insert(rule.id, stop.clone());
+                            active_remote_forwards.insert(
+                                rule.id,
+                                ActiveRemoteForward {
+                                    listener,
+                                    stop,
+                                    rule: rule.clone(),
+                                },
+                            );
+                            let _ = response.send(Ok(rule));
+                        }
+                        Err(error) => {
+                            let _ = response
+                                .send(Err(format!("remote forwarding request failed: {error}")));
+                        }
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Disconnected) => {
+                    cleanup_active_forwards(
+                        &mut active_forwards,
+                        &mut active_remote_forwards,
+                        &manager,
+                    );
+                    return;
+                }
+            }
+        }
+
+        let forwarding_ids = active_forwards.keys().copied().collect::<Vec<_>>();
+        for forwarding_id in forwarding_ids {
+            let Some(forward) = active_forwards.get(&forwarding_id) else {
+                continue;
+            };
+            if forward.stop.load(Ordering::Relaxed) {
+                continue;
+            }
+            loop {
+                let Ok((mut stream, _peer)) = forward.listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+                let (target_host, target_port) = if forward.rule.kind == ForwardingKind::Socks {
+                    match socks5_handshake(&mut stream) {
+                        Ok(target) => target,
+                        Err(_) => {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                            continue;
+                        }
+                    }
+                } else {
+                    (
+                        forward
+                            .rule
+                            .target_host
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_string(),
+                        forward.rule.target_port.unwrap_or_default(),
+                    )
+                };
+                match channel_direct_tcpip_retry(&session, &target_host, target_port) {
+                    Ok(mut channel) => {
+                        if forward.rule.kind == ForwardingKind::Socks {
+                            let _ = stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+                        }
+                        std::thread::spawn(move || {
+                            let mut stream_clone = match stream.try_clone() {
+                                Ok(clone) => clone,
+                                Err(_) => return,
+                            };
+                            let mut channel_clone = channel.clone();
+                            let left = std::thread::spawn(move || {
+                                copy_with_would_block_retry(&mut stream_clone, &mut channel_clone);
+                            });
+                            copy_with_would_block_retry(&mut channel, &mut stream);
+                            let _ = left.join();
+                        });
+                    }
+                    Err(_) => {
+                        if forward.rule.kind == ForwardingKind::Socks {
+                            let _ = stream.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]);
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                }
+            }
+        }
+
+        let remote_forwarding_ids = active_remote_forwards.keys().copied().collect::<Vec<_>>();
+        for forwarding_id in remote_forwarding_ids {
+            let Some(forward) = active_remote_forwards.get_mut(&forwarding_id) else {
+                continue;
+            };
+            if forward.stop.load(Ordering::Relaxed) {
+                continue;
+            }
+            loop {
+                let Ok(mut channel) = forward.listener.accept() else {
+                    break;
+                };
+                let target_host = forward
+                    .rule
+                    .target_host
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string();
+                let target_port = forward.rule.target_port.unwrap_or_default();
+                match TcpStream::connect((target_host.as_str(), target_port)) {
+                    Ok(mut stream) => {
+                        std::thread::spawn(move || {
+                            let mut channel_clone = channel.clone();
+                            let mut stream_clone = match stream.try_clone() {
+                                Ok(clone) => clone,
+                                Err(_) => return,
+                            };
+                            let left = std::thread::spawn(move || {
+                                copy_with_would_block_retry(&mut channel_clone, &mut stream_clone);
+                            });
+                            copy_with_would_block_retry(&mut stream, &mut channel);
+                            let _ = left.join();
+                        });
+                    }
+                    Err(_) => {
+                        let _ = channel.close();
+                    }
+                }
             }
         }
 
@@ -1400,6 +1893,7 @@ fn run_ssh_session_loop(
             runtime_token,
             &manager,
         ) else {
+            cleanup_active_forwards(&mut active_forwards, &mut active_remote_forwards, &manager);
             return;
         };
         if bytes_read > 0 {
@@ -1433,6 +1927,11 @@ fn run_ssh_session_loop(
                         runtime_token,
                         format!("terminal write failed: {error}"),
                     );
+                    cleanup_active_forwards(
+                        &mut active_forwards,
+                        &mut active_remote_forwards,
+                        &manager,
+                    );
                     return;
                 }
             }
@@ -1447,6 +1946,11 @@ fn run_ssh_session_loop(
                         session_id,
                         runtime_token,
                         format!("terminal flush failed: {error}"),
+                    );
+                    cleanup_active_forwards(
+                        &mut active_forwards,
+                        &mut active_remote_forwards,
+                        &manager,
                     );
                     return;
                 }
@@ -1472,6 +1976,7 @@ fn run_ssh_session_loop(
             runtime_token,
             &manager,
         ) else {
+            cleanup_active_forwards(&mut active_forwards, &mut active_remote_forwards, &manager);
             return;
         };
         if bytes_read > 0 {
@@ -1511,6 +2016,11 @@ fn run_ssh_session_loop(
                     }
                     if health_failures >= SSH_HEALTH_FAILURE_LIMIT {
                         manager.fail_session_for_runtime(session_id, runtime_token, reason);
+                        cleanup_active_forwards(
+                            &mut active_forwards,
+                            &mut active_remote_forwards,
+                            &manager,
+                        );
                         return;
                     }
                     next_health_probe_at =
@@ -1521,6 +2031,121 @@ fn run_ssh_session_loop(
 
         socket_waiter.wait(&session, Duration::from_millis(10));
     }
+}
+
+fn cleanup_active_forwards(
+    active_forwards: &mut HashMap<Uuid, ActiveForward>,
+    active_remote_forwards: &mut HashMap<Uuid, ActiveRemoteForward>,
+    manager: &SessionManager,
+) {
+    for (forwarding_id, forward) in active_forwards.drain() {
+        forward.stop.store(true, Ordering::Relaxed);
+        manager.forwarding_stops.write().remove(&forwarding_id);
+    }
+    for (forwarding_id, forward) in active_remote_forwards.drain() {
+        forward.stop.store(true, Ordering::Relaxed);
+        manager.forwarding_stops.write().remove(&forwarding_id);
+    }
+}
+
+fn copy_with_would_block_retry<R: Read, W: Write>(reader: &mut R, writer: &mut W) {
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                let _ = writer.flush();
+                return;
+            }
+            Ok(bytes) => {
+                let mut offset = 0;
+                while offset < bytes {
+                    match writer.write(&buffer[offset..bytes]) {
+                        Ok(0) => return,
+                        Ok(written) => offset += written,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
+                }
+                let _ = writer.flush();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn channel_direct_tcpip_retry(
+    session: &ssh2::Session,
+    host: &str,
+    port: u16,
+) -> Result<ssh2::Channel, ssh2::Error> {
+    let mut result = session.channel_direct_tcpip(host, port, None);
+    for _ in 0..40 {
+        let Err(error) = &result else {
+            break;
+        };
+        if !is_transient_ssh2_error(error) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        result = session.channel_direct_tcpip(host, port, None);
+    }
+    result
+}
+
+fn socks5_handshake(stream: &mut TcpStream) -> anyhow::Result<(String, u16)> {
+    let mut header = [0_u8; 2];
+    stream.read_exact(&mut header)?;
+    if header[0] != 5 {
+        anyhow::bail!("unsupported SOCKS version");
+    }
+    let mut methods = vec![0_u8; usize::from(header[1])];
+    stream.read_exact(&mut methods)?;
+    if !methods.contains(&0) {
+        stream.write_all(&[5, 0xff])?;
+        anyhow::bail!("SOCKS authentication is not supported");
+    }
+    stream.write_all(&[5, 0])?;
+    let mut request = [0_u8; 4];
+    stream.read_exact(&mut request)?;
+    if request[0] != 5 || request[1] != 1 {
+        stream.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0])?;
+        anyhow::bail!("SOCKS supports TCP CONNECT only");
+    }
+    let host = match request[3] {
+        1 => {
+            let mut addr = [0_u8; 4];
+            stream.read_exact(&mut addr)?;
+            std::net::Ipv4Addr::from(addr).to_string()
+        }
+        3 => {
+            let mut len = [0_u8; 1];
+            stream.read_exact(&mut len)?;
+            let mut name = vec![0_u8; usize::from(len[0])];
+            stream.read_exact(&mut name)?;
+            String::from_utf8(name)?
+        }
+        4 => {
+            let mut addr = [0_u8; 16];
+            stream.read_exact(&mut addr)?;
+            std::net::Ipv6Addr::from(addr).to_string()
+        }
+        _ => {
+            stream.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0])?;
+            anyhow::bail!("unsupported SOCKS address type");
+        }
+    };
+    let mut port = [0_u8; 2];
+    stream.read_exact(&mut port)?;
+    let port = u16::from_be_bytes(port);
+    if port == 0 {
+        anyhow::bail!("SOCKS target port must be greater than zero");
+    }
+    Ok((host, port))
 }
 
 fn drain_channel_output(
@@ -3015,9 +3640,11 @@ fn establish_ssh_session(
     session_id: SessionId,
     profile: &SessionProfile,
     credential: &SshCredential,
+    jump: Option<(SessionProfile, SshCredential)>,
 ) -> Result<(ssh2::Session, ssh2::Channel, TcpStream), anyhow::Error> {
-    let (session, wait_socket) =
-        establish_authenticated_ssh_session(manager, session_id, profile, credential)?;
+    let (session, wait_socket) = establish_authenticated_ssh_session_with_jump(
+        manager, session_id, profile, credential, jump,
+    )?;
     let mut channel = session.channel_session().map_err(|error| {
         anyhow::anyhow!(
             "SSH channel open failed for {}@{}:{}: {}",
@@ -3057,9 +3684,11 @@ fn establish_ssh_side_session(
     session_id: SessionId,
     profile: &SessionProfile,
     credential: &SshCredential,
+    jump: Option<(SessionProfile, SshCredential)>,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
-    let (session, wait_socket) =
-        establish_authenticated_ssh_session(manager, session_id, profile, credential)?;
+    let (session, wait_socket) = establish_authenticated_ssh_session_with_jump(
+        manager, session_id, profile, credential, jump,
+    )?;
     wait_socket.set_nonblocking(true)?;
     session.set_blocking(true);
     Ok((session, wait_socket))
@@ -3071,19 +3700,97 @@ fn establish_authenticated_ssh_session(
     profile: &SessionProfile,
     credential: &SshCredential,
 ) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
+    establish_authenticated_ssh_session_with_jump(manager, session_id, profile, credential, None)
+}
+
+fn establish_authenticated_ssh_session_with_jump(
+    manager: &SessionManager,
+    session_id: SessionId,
+    profile: &SessionProfile,
+    credential: &SshCredential,
+    jump: Option<(SessionProfile, SshCredential)>,
+) -> Result<(ssh2::Session, TcpStream), anyhow::Error> {
     if let SshCredential::PrivateKey { key_path, .. } = credential {
         if !key_path.is_file() {
             anyhow::bail!("SSH private key file was not found: {}", key_path.display());
         }
     }
 
-    let address = format!("{}:{}", profile.host, profile.port);
-    let socket_addr = address
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("host did not resolve"))?;
-    let tcp =
-        TcpStream::connect_timeout(&socket_addr, Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS))
+    let (tcp, relay_guard): (TcpStream, Option<std::thread::JoinHandle<()>>) =
+        if let Some((jump_profile, jump_credential)) = jump {
+            let (jump_session, _) = establish_authenticated_ssh_session_with_jump(
+                manager,
+                session_id,
+                &jump_profile,
+                &jump_credential,
+                None,
+            )?;
+            // The SSH forwarding request itself is a synchronous libssh2 operation.
+            // Keep the jump session blocking until the direct-tcpip channel exists;
+            // the target session and relay can use their own I/O scheduling after that.
+            jump_session.set_blocking(true);
+            let channel = jump_session
+                .channel_direct_tcpip(&profile.host, profile.port, None)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "ProxyJump channel to {}:{} failed: {}",
+                        profile.host,
+                        profile.port,
+                        e
+                    )
+                })?;
+            jump_session.set_blocking(false);
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let addr = listener.local_addr()?;
+            let local = TcpStream::connect(addr)?;
+            let (peer, _) = listener.accept()?;
+            let relay = std::thread::spawn(move || {
+                let _jump_session = jump_session;
+                let mut channel = channel;
+                let mut peer = peer;
+                let _ = peer.set_nonblocking(true);
+                let mut buffer = [0_u8; 16 * 1024];
+                let mut reverse = [0_u8; 16 * 1024];
+                loop {
+                    let mut progressed = false;
+                    match channel.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if relay_write_retry(&mut peer, &buffer[..n]).is_err() {
+                                break;
+                            }
+                            progressed = true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => break,
+                    }
+                    match peer.read(&mut reverse) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if relay_write_retry(&mut channel, &reverse[..n]).is_err() {
+                                break;
+                            }
+                            progressed = true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => break,
+                    }
+                    if !progressed {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            });
+            (local, Some(relay))
+        } else {
+            let address = format!("{}:{}", profile.host, profile.port);
+            let socket_addr = address
+                .to_socket_addrs()?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("host did not resolve"))?;
+            let tcp = TcpStream::connect_timeout(
+                &socket_addr,
+                Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS),
+            )
             .map_err(|error| {
                 anyhow::anyhow!(
                     "TCP connect to {}@{}:{} failed after {}s: {}",
@@ -3094,6 +3801,8 @@ fn establish_authenticated_ssh_session(
                     error
                 )
             })?;
+            (tcp, None)
+        };
     let wait_socket = tcp.try_clone().map_err(|error| {
         anyhow::anyhow!(
             "TCP socket clone failed for {}:{}: {}",
@@ -3146,7 +3855,27 @@ fn establish_authenticated_ssh_session(
     }
     session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
 
+    let _ = relay_guard;
     Ok((session, wait_socket))
+}
+
+fn relay_write_retry<W: Write>(writer: &mut W, mut data: &[u8]) -> std::io::Result<()> {
+    while !data.is_empty() {
+        match writer.write(data) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "relay closed",
+                ))
+            }
+            Ok(n) => data = &data[n..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 impl SessionManager {
@@ -3420,7 +4149,9 @@ fn is_transient_ssh_io_error(error: &std::io::Error) -> bool {
 fn is_transient_ssh2_error(error: &ssh2::Error) -> bool {
     if matches!(
         error.code(),
-        ssh2::ErrorCode::Session(-37) | ssh2::ErrorCode::Session(-9)
+        ssh2::ErrorCode::Session(-37)
+            | ssh2::ErrorCode::Session(-32)
+            | ssh2::ErrorCode::Session(-9)
     ) {
         return true;
     }
@@ -3434,6 +4165,81 @@ fn is_transient_ssh2_error(error: &ssh2::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarding_rule(kind: ForwardingKind, session_id: SessionId) -> ForwardingRule {
+        let is_socks = kind == ForwardingKind::Socks;
+        ForwardingRule {
+            id: Uuid::new_v4(),
+            session_id,
+            kind,
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 28080,
+            target_host: (!is_socks).then(|| "127.0.0.1".to_string()),
+            target_port: (!is_socks).then_some(18080),
+            state: crate::ForwardingState::Stopped,
+            last_error: None,
+            active_connections: 0,
+            auto_resume: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_forward_starts_do_not_leave_runtime_rules() {
+        let manager = SessionManager::new();
+        let session_id = Uuid::new_v4();
+
+        assert!(manager
+            .start_local_forward(
+                session_id,
+                forwarding_rule(ForwardingKind::Local, session_id),
+            )
+            .await
+            .is_err());
+        assert!(manager
+            .start_remote_forward(
+                session_id,
+                forwarding_rule(ForwardingKind::Remote, session_id),
+            )
+            .await
+            .is_err());
+        assert!(manager
+            .start_socks_forward(
+                session_id,
+                forwarding_rule(ForwardingKind::Socks, session_id),
+            )
+            .await
+            .is_err());
+        assert!(manager.list_forwarding_rules(session_id).is_empty());
+    }
+
+    #[test]
+    fn socks5_handshake_parses_domain_and_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SOCKS test listener");
+        let address = listener.local_addr().expect("read listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept SOCKS test connection");
+            socks5_handshake(&mut stream)
+        });
+
+        let mut client = TcpStream::connect(address).expect("connect SOCKS test client");
+        client.write_all(&[5, 1, 0]).expect("send greeting");
+        let mut greeting_response = [0_u8; 2];
+        client
+            .read_exact(&mut greeting_response)
+            .expect("read greeting response");
+        assert_eq!(greeting_response, [5, 0]);
+
+        let hostname = b"example.internal";
+        let mut request = vec![5, 1, 0, 3, hostname.len() as u8];
+        request.extend_from_slice(hostname);
+        request.extend_from_slice(&8443_u16.to_be_bytes());
+        client.write_all(&request).expect("send CONNECT request");
+
+        assert_eq!(
+            server.join().expect("join SOCKS test server").unwrap(),
+            ("example.internal".to_string(), 8443)
+        );
+    }
 
     fn test_session_runtime(session_id: SessionId) -> SessionRuntime {
         let profile = SessionProfile {
@@ -3471,6 +4277,7 @@ mod tests {
             },
             profile,
             credential: SshCredential::Password("test".to_string()),
+            jump: None,
             output_tail: VecDeque::new(),
             next_output_sequence: 0,
             ssh: None,

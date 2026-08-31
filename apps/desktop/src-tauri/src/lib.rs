@@ -3,9 +3,9 @@ use joyshell_agent::{
 };
 use joyshell_core::{
     list_ssh_agent_identities as enumerate_ssh_agent_identities, sha256_fingerprint, AuthMethod,
-    HostKeyDecision, KnownHostsStore, RemoteDirectoryListing, SessionInfo, SessionManager,
-    SessionProfile, SftpProgress, SystemSnapshot, TerminalOutputBatch, TransferConflictDecision,
-    TransferStatus,
+    ForwardingRule, ForwardingState, HostKeyDecision, KnownHostsStore, RemoteDirectoryListing,
+    SessionInfo, SessionManager, SessionProfile, SftpProgress, SystemSnapshot, TerminalOutputBatch,
+    TransferConflictDecision, TransferStatus,
 };
 use joyshell_store::{
     AuditAction, AuditEntry, AuditLog, CommandSnippet, LayoutSettings, MemoryStore,
@@ -446,7 +446,20 @@ async fn connect_profile(
         .get_profile(profile_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "profile was not found".to_string())?;
+    validate_jump_chain(&state.profiles, &profile).map_err(|error| error.to_string())?;
     let session_id = session_id.unwrap_or_else(Uuid::new_v4);
+    if let Some(jump_id) = profile.jump_host_id {
+        let jump = state
+            .profiles
+            .get_profile(jump_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "jump host profile was not found".to_string())?;
+        let handle = connect_profile_via_jump(&state, &profile, &jump, session_id).await?;
+        return state
+            .sessions
+            .get_session(handle.id())
+            .ok_or_else(|| "session did not start".to_string());
+    }
     let insecure_host_key_policy = matches!(
         profile.host_key_policy,
         joyshell_core::HostKeyPolicy::InsecureAcceptAny
@@ -524,6 +537,317 @@ async fn connect_profile(
         .sessions
         .get_session(handle.id())
         .ok_or_else(|| "session did not start".to_string())
+}
+
+async fn connect_profile_via_jump(
+    state: &AppState,
+    profile: &SessionProfile,
+    jump: &SessionProfile,
+    session_id: Uuid,
+) -> Result<joyshell_core::SshSessionHandle, String> {
+    async fn load_credential(
+        state: &AppState,
+        auth: &AuthMethod,
+        fingerprint: Option<&str>,
+    ) -> Result<joyshell_core::SshCredential, String> {
+        match auth {
+            AuthMethod::Password { secret_ref } => Ok(joyshell_core::SshCredential::Password(
+                load_secret(state, secret_ref)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "password is missing".to_string())?,
+            )),
+            AuthMethod::PrivateKey {
+                key_ref,
+                passphrase_ref,
+            } => Ok(joyshell_core::SshCredential::PrivateKey {
+                key_path: PathBuf::from(key_ref),
+                passphrase: passphrase_ref
+                    .as_ref()
+                    .map(|r| load_secret(state, r))
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .flatten(),
+            }),
+            AuthMethod::Agent => Ok(joyshell_core::SshCredential::Agent {
+                identity_fingerprint: fingerprint.map(str::to_string),
+            }),
+        }
+    }
+    let target_credential = load_credential(
+        state,
+        &profile.auth_method,
+        profile.agent_identity_fingerprint.as_deref(),
+    )
+    .await?;
+    let jump_credential = load_credential(
+        state,
+        &jump.auth_method,
+        jump.agent_identity_fingerprint.as_deref(),
+    )
+    .await?;
+    state
+        .sessions
+        .connect_ssh_with_jump_for_session(
+            profile.clone(),
+            target_credential,
+            jump.clone(),
+            jump_credential,
+            session_id,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    /* legacy per-pair dispatch retained below for reference during migration.
+        (
+            AuthMethod::Password {
+                secret_ref: target_ref,
+            },
+            AuthMethod::Password {
+                secret_ref: jump_ref,
+            },
+        ) => {
+            let target = load_secret(state, target_ref)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "password is missing".to_string())?;
+            let jump_password = load_secret(state, jump_ref)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "jump password is missing".to_string())?;
+            state
+                .sessions
+                .connect_ssh_password_via_jump_for_session(
+                    profile.clone(),
+                    target,
+                    jump.clone(),
+                    jump_password,
+                    session_id,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        (
+            AuthMethod::PrivateKey {
+                key_ref,
+                passphrase_ref,
+            },
+            AuthMethod::PrivateKey {
+                key_ref: jump_key,
+                passphrase_ref: jump_pass,
+            },
+        ) => {
+            let pass = passphrase_ref
+                .as_ref()
+                .map(|r| load_secret(state, r))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            let jump_passphrase = jump_pass
+                .as_ref()
+                .map(|r| load_secret(state, r))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .flatten();
+            state
+                .sessions
+                .connect_ssh_private_key_via_jump_for_session(
+                    profile.clone(),
+                    PathBuf::from(key_ref),
+                    pass,
+                    jump.clone(),
+                    PathBuf::from(jump_key),
+                    jump_passphrase,
+                    session_id,
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        (AuthMethod::Agent, AuthMethod::Agent) => state
+            .sessions
+            .connect_ssh_agent_via_jump_for_session(
+                profile.clone(),
+                profile.agent_identity_fingerprint.clone(),
+                jump.clone(),
+                jump.agent_identity_fingerprint.clone(),
+                session_id,
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        _ => Err(
+            "ProxyJump requires the target and jump host to use the same authentication method"
+                .to_string(),
+        ),
+    } */
+}
+
+fn validate_jump_chain(
+    profiles: &ProfileRepository,
+    profile: &SessionProfile,
+) -> Result<(), anyhow::Error> {
+    let mut current = profile.clone();
+    let mut seen = std::collections::HashSet::new();
+    for depth in 0..=1 {
+        let Some(jump_id) = current.jump_host_id else {
+            return Ok(());
+        };
+        if jump_id == current.id || !seen.insert(jump_id) {
+            anyhow::bail!("invalid SSH jump host configuration: profile cycle detected");
+        }
+        if depth >= 1 {
+            anyhow::bail!("multi-level SSH jump hosts are not supported");
+        }
+        current = profiles
+            .get_profile(jump_id)?
+            .ok_or_else(|| anyhow::anyhow!("jump host profile was not found"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_local_forward(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    rule: ForwardingRule,
+) -> Result<ForwardingRule, String> {
+    let result = state
+        .sessions
+        .start_local_forward(session_id, rule)
+        .await
+        .map_err(|error| error.to_string());
+    if let Ok(rule) = &result {
+        let _ = state.profiles.upsert_forwarding_rule(rule);
+    }
+    state.audit.record(
+        "user",
+        Some(session_id),
+        AuditAction::PermissionDecision,
+        format!("forward local session={session_id}"),
+        Some(if result.is_ok() { "allow" } else { "deny" }.to_string()),
+        "port forwarding local",
+    );
+    result
+}
+
+#[tauri::command]
+async fn start_remote_forward(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    rule: ForwardingRule,
+) -> Result<ForwardingRule, String> {
+    let result = state
+        .sessions
+        .start_remote_forward(session_id, rule)
+        .await
+        .map_err(|error| error.to_string());
+    if let Ok(rule) = &result {
+        let _ = state.profiles.upsert_forwarding_rule(rule);
+    }
+    state.audit.record(
+        "user",
+        Some(session_id),
+        AuditAction::PermissionDecision,
+        format!("forward remote session={session_id}"),
+        Some(if result.is_ok() { "allow" } else { "deny" }.to_string()),
+        "port forwarding remote",
+    );
+    result
+}
+
+#[tauri::command]
+async fn start_socks_forward(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    rule: ForwardingRule,
+) -> Result<ForwardingRule, String> {
+    let result = state
+        .sessions
+        .start_socks_forward(session_id, rule)
+        .await
+        .map_err(|error| error.to_string());
+    if let Ok(rule) = &result {
+        let _ = state.profiles.upsert_forwarding_rule(rule);
+    }
+    state.audit.record(
+        "user",
+        Some(session_id),
+        AuditAction::PermissionDecision,
+        format!("forward socks session={session_id}"),
+        Some(if result.is_ok() { "allow" } else { "deny" }.to_string()),
+        "port forwarding socks",
+    );
+    result
+}
+
+#[tauri::command]
+fn stop_port_forward(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    forwarding_id: Uuid,
+) -> Result<(), String> {
+    state
+        .sessions
+        .stop_forward(session_id, forwarding_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(rule) = state
+        .sessions
+        .list_forwarding_rules(session_id)
+        .into_iter()
+        .find(|rule| rule.id == forwarding_id)
+    {
+        state
+            .profiles
+            .upsert_forwarding_rule(&rule)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_port_forwards(state: State<'_, AppState>, session_id: Uuid) -> Vec<ForwardingRule> {
+    let runtime_rules = state.sessions.list_forwarding_rules(session_id);
+    if !runtime_rules.is_empty() {
+        return runtime_rules;
+    }
+    state
+        .profiles
+        .list_forwarding_rules(Some(session_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut rule| {
+            if matches!(
+                rule.state,
+                ForwardingState::Running
+                    | ForwardingState::Starting
+                    | ForwardingState::Reconnecting
+            ) {
+                rule.state = ForwardingState::Stopped;
+                rule.active_connections = 0;
+                let _ = state.profiles.upsert_forwarding_rule(&rule);
+            }
+            rule
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn save_port_forward(state: State<'_, AppState>, rule: ForwardingRule) -> Result<(), String> {
+    state
+        .profiles
+        .upsert_forwarding_rule(&rule)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_port_forward(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    forwarding_id: Uuid,
+) -> Result<(), String> {
+    state
+        .sessions
+        .remove_forwarding_rule(session_id, forwarding_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .profiles
+        .delete_forwarding_rule(forwarding_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1474,6 +1798,13 @@ pub fn run() {
             get_layout_settings,
             save_layout_settings,
             connect_profile,
+            start_local_forward,
+            start_remote_forward,
+            start_socks_forward,
+            stop_port_forward,
+            list_port_forwards,
+            remove_port_forward,
+            save_port_forward,
             accept_known_host,
             list_known_hosts,
             remove_known_host,

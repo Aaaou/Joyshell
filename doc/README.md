@@ -5,6 +5,7 @@
 ## 总览
 
 - [开发历程与问题记录](development-history.md)
+- [版本与构建编号规则](../docs/versioning-and-builds.md)
 - [SSH 技术选型调研](../docs/research-ssh-client-tech-selection.md)
 - [总体实现状态](../docs/implementation-notes.md)
 
@@ -42,3 +43,4 @@
 4. 测试命令只使用占位主机和占位凭据。
 5. 每次修复重大兼容性/并发/数据安全问题后更新对应组件文档。
 6. 发布前检查素材许可证、已知限制和最新安装包版本。
+7. 从 `0.1.70` 起，每次可分发构建都必须按版本与构建编号规则递增 `build`，禁止用相同标识替换已发布产物。

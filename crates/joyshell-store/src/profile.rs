@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use joyshell_core::{AuthMethod, HostKeyPolicy, SessionId, SessionProfile, SftpProgress};
+use joyshell_core::{
+    AuthMethod, ForwardingRule, HostKeyPolicy, SessionId, SessionProfile, SftpProgress,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionFolder {
@@ -434,6 +436,61 @@ impl ProfileRepository {
         Ok(())
     }
 
+    pub fn upsert_forwarding_rule(&self, rule: &ForwardingRule) -> rusqlite::Result<()> {
+        let payload = serde_json::to_string(rule).map_err(json_to_sql_error)?;
+        if let ProfileStorage::Sqlite { connection } = &self.storage {
+            connection.lock().execute("insert into forwarding_rules (id, profile_id, session_id, payload, updated_at) values (?1, ?2, ?3, ?4, datetime('now')) on conflict(id) do update set payload=excluded.payload, updated_at=datetime('now')", params![rule.id.to_string(), rule.session_id.to_string(), rule.session_id.to_string(), payload])?;
+        }
+        Ok(())
+    }
+
+    pub fn list_forwarding_rules(
+        &self,
+        session_id: Option<Uuid>,
+    ) -> rusqlite::Result<Vec<ForwardingRule>> {
+        match &self.storage {
+            ProfileStorage::Memory { .. } => Ok(Vec::new()),
+            ProfileStorage::Sqlite { connection } => {
+                let connection = connection.lock();
+                let mut statement = if session_id.is_some() {
+                    connection.prepare("select payload from forwarding_rules where session_id=?1 order by updated_at desc")?
+                } else {
+                    connection
+                        .prepare("select payload from forwarding_rules order by updated_at desc")?
+                };
+                let mut rules = Vec::new();
+                if let Some(id) = session_id {
+                    let rows = statement.query_map(params![id.to_string()], |row| {
+                        let payload: String = row.get(0)?;
+                        serde_json::from_str(&payload).map_err(json_from_sql_error)
+                    })?;
+                    for row in rows {
+                        rules.push(row?);
+                    }
+                } else {
+                    let rows = statement.query_map([], |row| {
+                        let payload: String = row.get(0)?;
+                        serde_json::from_str(&payload).map_err(json_from_sql_error)
+                    })?;
+                    for row in rows {
+                        rules.push(row?);
+                    }
+                }
+                Ok(rules)
+            }
+        }
+    }
+
+    pub fn delete_forwarding_rule(&self, id: Uuid) -> rusqlite::Result<()> {
+        if let ProfileStorage::Sqlite { connection } = &self.storage {
+            connection.lock().execute(
+                "delete from forwarding_rules where id=?1",
+                params![id.to_string()],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn upsert_secret(
         &self,
         secret_ref: &str,
@@ -809,6 +866,14 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             updated_at text not null default (datetime('now'))
         );
 
+        create table if not exists forwarding_rules (
+            id text primary key,
+            profile_id text not null,
+            session_id text not null,
+            payload text not null,
+            updated_at text not null default (datetime('now'))
+        );
+
         create table if not exists command_snippets (
             id text primary key,
             title text not null,
@@ -1095,6 +1160,68 @@ fn crypto_to_sql_error(error: impl Debug) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use joyshell_core::{ForwardingKind, ForwardingState};
+
+    #[test]
+    fn persists_filters_updates_and_deletes_forwarding_rules() {
+        let database_path =
+            std::env::temp_dir().join(format!("joyshell-forwarding-{}.db", Uuid::new_v4()));
+        let repository = ProfileRepository::sqlite(&database_path).expect("open database");
+        let session_id = Uuid::new_v4();
+        let other_session_id = Uuid::new_v4();
+        let mut rule = ForwardingRule {
+            id: Uuid::new_v4(),
+            session_id,
+            kind: ForwardingKind::Local,
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 28080,
+            target_host: Some("127.0.0.1".to_string()),
+            target_port: Some(18080),
+            state: ForwardingState::Running,
+            last_error: None,
+            active_connections: 1,
+            auto_resume: true,
+        };
+
+        repository
+            .upsert_forwarding_rule(&rule)
+            .expect("save forwarding rule");
+        assert_eq!(
+            repository
+                .list_forwarding_rules(Some(session_id))
+                .expect("list session rules"),
+            vec![rule.clone()]
+        );
+        assert!(repository
+            .list_forwarding_rules(Some(other_session_id))
+            .expect("list unrelated session rules")
+            .is_empty());
+
+        rule.state = ForwardingState::Stopped;
+        rule.active_connections = 0;
+        repository
+            .upsert_forwarding_rule(&rule)
+            .expect("update forwarding rule");
+        assert_eq!(
+            repository
+                .list_forwarding_rules(None)
+                .expect("list all rules"),
+            vec![rule.clone()]
+        );
+
+        repository
+            .delete_forwarding_rule(rule.id)
+            .expect("delete forwarding rule");
+        assert!(repository
+            .list_forwarding_rules(None)
+            .expect("list rules after delete")
+            .is_empty());
+
+        drop(repository);
+        let _ = fs::remove_file(&database_path);
+        let _ = fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", database_path.display()));
+    }
 
     #[test]
     fn migrates_and_persists_detected_operating_system() {

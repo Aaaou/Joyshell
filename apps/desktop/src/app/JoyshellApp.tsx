@@ -101,7 +101,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.68";
+const clientBuildLabel = "0.1.69";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -265,7 +265,14 @@ const {
   sftpRenamePath,
   sftpUploadFile,
   terminalOutputBatch,
-  writeTerminal
+  writeTerminal,
+  startLocalForward,
+  startRemoteForward,
+  startSocksForward,
+  stopPortForward,
+  listPortForwards,
+  removePortForward
+  ,savePortForward
 } = desktopClient;
 import {
   advanceSessionHealthFailure,
@@ -345,10 +352,19 @@ export function App() {
     try { return JSON.parse(localStorage.getItem("joyshell.lan.devices") || "[]") as LanDevice[]; } catch { return []; }
   });
   const [lanScanning, setLanScanning] = useState(false);
+  const [transferQueueOpen, setTransferQueueOpen] = useState(true);
   const [lanToolsOpen, setLanToolsOpen] = useState(false);
   const [lanScanRequested, setLanScanRequested] = useState(false);
   const [lanScanOpen, setLanScanOpen] = useState(false);
+  const [forwardOpen, setForwardOpen] = useState(false);
   const [selectedLanDevice, setSelectedLanDevice] = useState<LanDevice | null>(null);
+  const [forwardRules, setForwardRules] = useState<import("../types").ForwardingRule[]>([]);
+  const [forwardKind, setForwardKind] = useState<import("../types").ForwardingKind>("local");
+  const [forwardListenHost, setForwardListenHost] = useState("127.0.0.1");
+  const [forwardListenPort, setForwardListenPort] = useState(1080);
+  const [forwardTargetHost, setForwardTargetHost] = useState("127.0.0.1");
+  const [forwardTargetPort, setForwardTargetPort] = useState(22);
+  const [forwardBusy, setForwardBusy] = useState(false);
   const scanLanDevices = desktopClient.scanLanDevices;
   const transferRuntime = useTransferRuntime();
   const { transfers, transferStats, cancellingTransfers, hasActiveTransfer } = transferRuntime.state;
@@ -598,6 +614,39 @@ export function App() {
     () => sessions.find((session) => session.id === activeProfileId && isConnectedState(session.state)),
     [activeProfileId, sessions]
   );
+  useEffect(() => {
+    if (!activeSession) { setForwardRules([]); return; }
+    void listPortForwards(activeSession.id).then(setForwardRules).catch(() => setForwardRules([]));
+  }, [activeSession?.id]);
+  const createForwardRule = useCallback(async () => {
+    if (!activeSession || forwardBusy) return;
+    setForwardBusy(true);
+    const rule = { id: crypto.randomUUID(), session_id: activeSession.id, kind: forwardKind, listen_host: forwardListenHost || "127.0.0.1", listen_port: forwardListenPort, target_host: forwardKind === "socks" ? null : forwardTargetHost, target_port: forwardKind === "socks" ? null : forwardTargetPort, state: "stopped" as const, last_error: null, active_connections: 0, auto_resume: true };
+    try {
+      const started = forwardKind === "local" ? await startLocalForward(activeSession.id, rule) : forwardKind === "remote" ? await startRemoteForward(activeSession.id, rule) : await startSocksForward(activeSession.id, rule);
+      await savePortForward(started);
+      setForwardRules((current) => [...current.filter((item) => item.id !== started.id), started]);
+    } catch (error) { flash(`转发启动失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setForwardBusy(false); }
+  }, [activeSession, forwardBusy, forwardKind, forwardListenHost, forwardListenPort, forwardTargetHost, forwardTargetPort, flash]);
+
+  const resumeForwardRule = useCallback(async (rule: import("../types").ForwardingRule) => {
+    if (forwardBusy) return;
+    setForwardBusy(true);
+    try {
+      const started = rule.kind === "local"
+        ? await startLocalForward(rule.session_id, rule)
+        : rule.kind === "remote"
+          ? await startRemoteForward(rule.session_id, rule)
+          : await startSocksForward(rule.session_id, rule);
+      await savePortForward(started);
+      setForwardRules((current) => current.map((item) => item.id === started.id ? started : item));
+    } catch (error) {
+      flash(`转发继续失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setForwardBusy(false);
+    }
+  }, [flash, forwardBusy]);
 
   const selectedRemoteEntry = useMemo(
     () => sftpListing?.entries.find((entry) => entry.path === selectedRemotePath) ?? null,
@@ -807,7 +856,11 @@ export function App() {
   }, [activeSession?.id, syncTerminalOutputBatch]);
 
   useEffect(() => {
-    const target = activeSession ? resolveLatencyTarget(activeProfile) : null;
+    const jumpProfile = activeProfile?.jump_host_id
+      ? profiles.find((profile) => profile.id === activeProfile.jump_host_id)
+      : undefined;
+    const target = activeSession ? resolveLatencyTarget(jumpProfile ?? activeProfile) : null;
+    const latencyUsesJump = Boolean(jumpProfile);
     if (!target || !activeSession) {
       setLatencyMs(null);
       setLatencyStatus(activeProfileId && terminalDisconnectNoticeRef.current[activeProfileId] ? "断开" : "待连接");
@@ -896,7 +949,7 @@ export function App() {
         }
         if (tcpLatency !== null && !activeProfile?.use_terminal_latency_probe) {
           setLatencyMs(tcpLatency);
-          setLatencyStatus("TCP RTT");
+          setLatencyStatus(latencyUsesJump ? "跳板 RTT" : "TCP RTT");
         }
       } finally {
         refreshInFlight = false;
@@ -914,11 +967,13 @@ export function App() {
     };
   }, [
     activeProfile?.host,
+    activeProfile?.jump_host_id,
     activeProfile?.port,
     activeProfile?.use_terminal_latency_probe,
     activeProfileId,
     activeSession?.id,
     activeSession?.state,
+    profiles,
     recordSessionHealthFailure
   ]);
 
@@ -3076,10 +3131,13 @@ export function App() {
         <div className="drawer-rail" />
         <div className="drawer-content">
           <section className="panel transfer-panel">
-            <div className="panel-heading">
+            <button className="tool-folder" onClick={() => setTransferQueueOpen((open) => !open)} aria-expanded={transferQueueOpen}>
               <Folder size={17} />
               <strong>任务队列</strong>
-            </div>
+              {transfers.length > 0 ? <span className="tool-folder-count">{transfers.length}</span> : null}
+              <ChevronRight size={14} className={transferQueueOpen ? "tool-folder-chevron open" : "tool-folder-chevron"} />
+            </button>
+            {transferQueueOpen ? <div className="tool-folder-content transfer-folder-content">
             <div className="transfer-actions">
               <button title="Upload" onClick={uploadRemoteFile} disabled={!activeSession || sftpBusy}>
                 <Upload size={16} />
@@ -3133,6 +3191,7 @@ export function App() {
                 </div>
               );
             })}
+            </div> : null}
           </section>
 
           <section className="panel lan-device-panel">
@@ -3142,12 +3201,28 @@ export function App() {
               <ChevronRight size={14} className={lanToolsOpen ? "tool-folder-chevron open" : "tool-folder-chevron"} />
             </button>
             {lanToolsOpen ? <div className="tool-folder-content">
-              <button className="tool-entry" onClick={() => { setLanScanOpen((open) => !open); if (!lanScanRequested) { setLanScanRequested(true); void refreshLanDevices(); } }} disabled={lanScanning} aria-expanded={lanScanOpen}>
+              {!lanScanOpen && !forwardOpen ? <div className="tool-grid">
+              <button className="tool-card" onClick={() => { setLanScanOpen(true); if (!lanScanRequested) { setLanScanRequested(true); void refreshLanDevices(); } }} disabled={lanScanning}>
                 <Network size={15} />
-                <span><strong>内网设备扫描</strong><small>发现 IP、MAC 和设备类型</small></span>
-                {lanScanning ? <RefreshCw size={14} className="spin" /> : <ChevronRight size={14} className={lanScanOpen ? "tool-folder-chevron open" : ""} />}
+                <strong>内网设备扫描</strong><small>发现 IP、MAC 和设备类型</small>
               </button>
-              {lanScanRequested && lanScanOpen ? <div className="lan-device-results">
+              <button className="tool-card" onClick={() => setForwardOpen(true)}>
+                <SplitSquareHorizontal size={15} /><strong>端口转发</strong><small>Local / Remote / SOCKS5</small>
+              </button>
+              </div> : null}
+              {forwardOpen ? <div className="focused-tool">
+                <button className="lan-back-button" onClick={() => setForwardOpen(false)}>‹ 网络工具</button>
+                <div className="panel-heading forwarding-heading"><Network size={17} /><strong>端口转发</strong><span className="muted">当前会话</span></div>
+                <div className="forwarding-form">
+                  <label className="forwarding-field forwarding-kind"><span>转发类型</span><select value={forwardKind} onChange={(event) => setForwardKind(event.target.value as import("../types").ForwardingKind)}><option value="local">Local -L · 本地访问远端</option><option value="remote">Remote -R · 远端访问本地</option><option value="socks">SOCKS5 -D · 动态代理</option></select></label>
+                  <div className="forwarding-endpoint-group"><div className="forwarding-group-title">监听端点</div><div className="forwarding-endpoint"><label className="forwarding-field"><span>地址</span><input value={forwardListenHost} onChange={(event) => setForwardListenHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="forwarding-field port"><span>端口</span><input type="number" min={0} max={65535} value={forwardListenPort} onChange={(event) => setForwardListenPort(Number(event.target.value))} placeholder="自动分配" /></label></div></div>
+                  {forwardKind !== "socks" ? <div className="forwarding-endpoint-group"><div className="forwarding-group-title">目标端点</div><div className="forwarding-endpoint"><label className="forwarding-field"><span>地址</span><input value={forwardTargetHost} onChange={(event) => setForwardTargetHost(event.target.value)} placeholder="127.0.0.1" /></label><label className="forwarding-field port"><span>端口</span><input type="number" min={1} max={65535} value={forwardTargetPort} onChange={(event) => setForwardTargetPort(Number(event.target.value))} /></label></div></div> : <p className="forwarding-note">SOCKS5 客户端连接时再指定目标地址，仅支持 TCP CONNECT。</p>}
+                  <button className="forwarding-start" onClick={() => void createForwardRule()} disabled={!activeSession || forwardBusy}><Plus size={14} />{forwardBusy ? "启动中..." : "启动转发"}</button>
+                </div>
+                {forwardRules.length === 0 ? <p className="muted">暂无转发规则。</p> : forwardRules.map((rule) => <div className="forwarding-row" key={rule.id}><span>{rule.kind.toUpperCase()} {rule.listen_host}:{rule.listen_port}</span><small>{rule.state} · {rule.active_connections}</small>{rule.state === "stopped" || rule.state === "failed" ? <button title="继续转发" onClick={() => { void resumeForwardRule(rule); }} disabled={forwardBusy}><Play size={13} /></button> : <button title="停止" onClick={() => { void stopPortForward(rule.session_id, rule.id).then(() => listPortForwards(rule.session_id).then(setForwardRules)); }} disabled={forwardBusy}><Square size={13} /></button>}<button title="删除" onClick={() => { void removePortForward(rule.session_id, rule.id).then(() => setForwardRules((current) => current.filter((item) => item.id !== rule.id))); }}><Trash2 size={13} /></button></div>)}
+              </div> : null}
+              {lanScanRequested && lanScanOpen ? <div className="focused-tool lan-device-results">
+              <div className="lan-detail-heading"><button className="lan-back-button" onClick={() => { setLanScanOpen(false); setSelectedLanDevice(null); }}>‹ 网络工具</button><strong>内网设备扫描</strong><span /></div>
               <div className="lan-results-heading"><span>扫描结果 · {lanDevices.filter((device) => device.online !== false).length}/{lanDevices.length} 台在线</span><button className="panel-heading-action" onClick={() => { void refreshLanDevices(); }} disabled={lanScanning} title="刷新设备"><RefreshCw size={14} className={lanScanning ? "spin" : ""} /></button></div>
               {selectedLanDevice ? <div className="lan-device-detail">
                 <div className="lan-detail-heading"><button className="lan-back-button" onClick={() => setSelectedLanDevice(null)}>‹ 设备列表</button><strong>设备详情</strong><span /></div>
@@ -3172,6 +3247,22 @@ export function App() {
             </div> : null}
             </div> : null}
           </section>
+
+          {false && <section className="panel forwarding-panel">
+            <div className="panel-heading forwarding-heading">
+              <Network size={17} /><strong>端口转发</strong><span className="muted">Local / Remote / SOCKS5</span>
+            </div>
+            <div className="forwarding-form">
+              <select value={forwardKind} onChange={(event) => setForwardKind(event.target.value as import("../types").ForwardingKind)}>
+                <option value="local">Local -L</option><option value="remote">Remote -R</option><option value="socks">SOCKS5 -D</option>
+              </select>
+              <input value={forwardListenHost} onChange={(event) => setForwardListenHost(event.target.value)} placeholder="监听地址" />
+              <input type="number" min={0} max={65535} value={forwardListenPort} onChange={(event) => setForwardListenPort(Number(event.target.value))} placeholder="监听端口" />
+              {forwardKind !== "socks" ? <><input value={forwardTargetHost} onChange={(event) => setForwardTargetHost(event.target.value)} placeholder="目标地址" /><input type="number" min={1} max={65535} value={forwardTargetPort} onChange={(event) => setForwardTargetPort(Number(event.target.value))} placeholder="目标端口" /></> : null}
+              <button onClick={() => void createForwardRule()} disabled={!activeSession || forwardBusy}><Plus size={14} />启动</button>
+            </div>
+            {forwardRules.length === 0 ? <p className="muted">暂无转发规则。</p> : forwardRules.map((rule) => <div className="forwarding-row" key={rule.id}><span>{rule.kind.toUpperCase()} {rule.listen_host}:{rule.listen_port}{rule.target_host ? ` -> ${rule.target_host}:${rule.target_port}` : ""}</span><small>{rule.state} · {rule.active_connections} connections</small><button title="停止" onClick={() => { void stopPortForward(rule.session_id, rule.id).then(() => listPortForwards(rule.session_id).then(setForwardRules)); }}><Square size={13} /></button><button title="删除" onClick={() => { void removePortForward(rule.session_id, rule.id).then(() => setForwardRules((current) => current.filter((item) => item.id !== rule.id))); }}><Trash2 size={13} /></button></div>)}
+          </section>}
 
           <section className="panel assistant-research-panel">
             <span>in researching</span>
@@ -3203,12 +3294,6 @@ export function App() {
                 <button onClick={() => { void pasteToTerminal(); closeContextMenu(); }}>粘贴</button>
                 <button onClick={() => { selectAllTerminal(); closeContextMenu(); }}>全选</button>
                 <button onClick={() => { clearTerminal(); closeContextMenu(); }}>清屏</button>
-                <button onClick={() => { if (activeProfileId) { void closeShellProfile(activeProfileId); } closeContextMenu(); }} disabled={!activeProfileId}>
-                  关闭当前 Shell
-                </button>
-                <button onClick={() => { void closeAllShells(); closeContextMenu(); }} disabled={openProfileIds.length === 0}>
-                  关闭全部 Shell
-                </button>
               </>
             ) : contextMenu.kind === "file" ? (
               <>
@@ -3405,6 +3490,7 @@ export function App() {
         <SshSettingsDialog
           profile={editingProfile ?? activeProfile ?? createBlankProfile()}
           folders={folders}
+          profiles={profiles}
           onClose={() => {
             setSettingsOpen(false);
             setEditingProfile(null);

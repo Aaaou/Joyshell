@@ -16,7 +16,8 @@ import type {
   SftpProgress,
   LanDevice,
   SystemSnapshot,
-  TerminalOutputBatch
+  TerminalOutputBatch,
+  ForwardingRule
 } from "../types";
 
 const canUseTauri = "__TAURI_INTERNALS__" in window;
@@ -166,6 +167,46 @@ export async function getCredentialStorageStatus(): Promise<CredentialStorageSta
     legacy_secrets_pending: false,
     legacy_secret_count: 0
   };
+}
+
+export async function startLocalForward(sessionId: string, rule: ForwardingRule): Promise<ForwardingRule> {
+  if (canUseTauri) {
+    return invoke("start_local_forward", { sessionId, rule });
+  }
+  return { ...rule, session_id: sessionId, kind: "local", state: "running" };
+}
+
+export async function startRemoteForward(sessionId: string, rule: ForwardingRule): Promise<ForwardingRule> {
+  if (canUseTauri) {
+    return invoke("start_remote_forward", { sessionId, rule });
+  }
+  return { ...rule, session_id: sessionId, kind: "remote", state: "running" };
+}
+
+export async function startSocksForward(sessionId: string, rule: ForwardingRule): Promise<ForwardingRule> {
+  if (canUseTauri) {
+    return invoke("start_socks_forward", { sessionId, rule });
+  }
+  return { ...rule, session_id: sessionId, kind: "socks", state: "running" };
+}
+
+export async function stopPortForward(sessionId: string, forwardingId: string): Promise<void> {
+  if (canUseTauri) {
+    await invoke("stop_port_forward", { sessionId, forwardingId });
+  }
+}
+
+export async function listPortForwards(sessionId: string): Promise<ForwardingRule[]> {
+  if (canUseTauri) return invoke("list_port_forwards", { sessionId });
+  return [];
+}
+
+export async function savePortForward(rule: ForwardingRule): Promise<void> {
+  if (canUseTauri) await invoke("save_port_forward", { rule });
+}
+
+export async function removePortForward(sessionId: string, forwardingId: string): Promise<void> {
+  if (canUseTauri) await invoke("remove_port_forward", { sessionId, forwardingId });
 }
 
 export async function removeKnownHost(host: string, port: number): Promise<boolean> {

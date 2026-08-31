@@ -1,8 +1,10 @@
+mod forwarding;
 mod known_hosts;
 mod session;
 mod sftp;
 mod terminal;
 
+pub use forwarding::{ForwardingKind, ForwardingRule, ForwardingState};
 pub use known_hosts::{sha256_fingerprint, HostKeyCheck, KnownHostEntry, KnownHostsStore};
 
 pub use session::{

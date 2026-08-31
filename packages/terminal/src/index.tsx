@@ -208,6 +208,10 @@ export function JoyTerminal({
       }}
       onMouseDown={() => terminalRef.current?.focus()}
       onClick={() => terminalRef.current?.focus()}
+      onContextMenu={(event) => {
+        // Keep right-click in the app context menu; xterm's default handler may paste clipboard text.
+        event.preventDefault();
+      }}
     />
   );
 }
