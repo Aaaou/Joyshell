@@ -101,7 +101,7 @@ import {
   type SystemDerivedStats
 } from "../features/system-info/system-model";
 import { Metric, SystemInfoDialog } from "../features/system-info/SystemInfoDialog";
-const clientBuildLabel = "0.1.69_build_3";
+const clientBuildLabel = "0.1.69_build_4";
 const forwardingStateLabel: Record<import("../types").ForwardingState, string> = {
   starting: "启动中",
   running: "运行中",

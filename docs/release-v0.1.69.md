@@ -56,7 +56,7 @@
 
 对应 Git 提交为 `d60bbe9`，Git 标签为 `v0.1.69-build.4`。安装包 Authenticode 状态为 `NotSigned`。
 
-安装包尚未进行 Authenticode 数字签名。开源 Pre-release 可分发未签名包，但 Windows 可能显示未知发布者或 SmartScreen 提示；用户应使用 Release 中的 SHA-256 校验文件。后续签名会改变文件哈希，必须使用新的构建号重新发布。
+安装包尚未进行 Authenticode 数字签名。开源项目可以分发未签名正式包，但 Windows 可能显示未知发布者或 SmartScreen 提示；用户应使用 Release 中的 SHA-256 校验文件。后续签名会改变文件哈希，必须使用新的构建号重新发布。
 
 独立构建序号从 `0.1.69_build_2` 候选起生效，本次正式发布构建为 `0.1.69_build_4`，详见 [版本与构建编号规则](versioning-and-builds.md)。
 
