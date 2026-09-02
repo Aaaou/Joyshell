@@ -1,12 +1,12 @@
 # Joyshell SSH 基础产品开发需求
 
 版本：v0.1
-日期：2026-08-29
+日期：2026-09-02
 范围：SSH/SFTP/终端/主机管理基础能力
 
 ## 1. 文档目标
 
-本文件用于指导 Joyshell 下一阶段开发。目标是把当前已经可用的 SSH 原型，推进到可以长期使用、可公开发布、能覆盖常见企业网络环境的基础产品。
+本文件记录 SSH 基础产品在 `v0.1.69_build_4` 正式发布后的验收基线，并指导 `v0.1.70` 及后续迭代。目标是把已发布的 Windows 企业网络能力推进到长期运行和跨平台可验证状态。
 
 本阶段**不实现** Agentic Loop、模型 Provider、MCP、插件市场和团队云同步。Agent 相关代码只能作为边界预留，不得阻塞 SSH 基础版本。
 
@@ -25,36 +25,39 @@
 - CPU、内存、磁盘、网络、负载、进程、运行时间等主机信息。
 - SQLite 本地配置和 AES-256-GCM secret store。
 
-当前明确未完成：
+当前已完成并进入持续验收：
 
-- `known_hosts` 主机密钥校验。
-- SSH Agent 认证。
-- 跳板机、端口转发和 SOCKS 转发。
-- 本地 Shell。
+- `known_hosts` 主机密钥校验、SSH Agent 认证。
+- 单级 ProxyJump、Local/Remote/SOCKS5 转发和可靠自动重连。
+- 运行中转发规则的断线恢复及 Profile 持久归属。
+
+当前仍未完成：
+
 - 持久化传输队列和应用重启后恢复。
-- 可靠自动重连。
-- 终端尺寸变化同步。
+- Windows 本地 Shell 与 v0.1.70 终端体验增强。
 - macOS/Linux 同等强度实机验收。
+- ProxyJump 断网恢复、混合认证和转发冲突隔离的完整实机矩阵。
+- 终端尺寸变化同步。
 
 ## 3. 发布门槛和优先级
 
-### P0：发布阻塞项
+### P0：稳定版阻塞项
 
-P0 项必须完成后，才允许将版本标记为生产可用：
+以下是面向 `v0.2.0 Windows Stable` 的剩余稳定版门槛；不影响 `v0.1.69_build_4` 正式版发布：
 
-1. `known_hosts` 严格校验和主机密钥变更阻断。
-2. SSH Agent 认证。
-3. 系统密钥链优先的敏感凭据存储。
-4. 传输队列持久化、重启恢复和重连续传。
+1. ProxyJump 断网恢复、混合认证和转发 generation 隔离的完整实机矩阵。
+2. 系统密钥链优先的敏感凭据存储和迁移回归。
+3. 传输队列持久化、应用重启恢复和重连续传。
+4. Windows 终端 resize、大输出和本地 Shell 验收。
 5. Windows、macOS、Linux 三平台最小回归矩阵。
 
 ### P1：核心竞争力
 
 P1 项用于对标 FinalShell、MobaXterm、Tabby、WindTerm：
 
-1. 跳板机/ProxyJump。
-2. 本地、远程和 SOCKS 端口转发。
-3. 终端 resize、搜索、快捷键和大输出稳定性。
+1. 跳板机/ProxyJump（代码已实现，持续集成验收）。
+2. 本地、远程和 SOCKS 端口转发（代码已实现，持续集成验收）。
+3. 终端 resize、搜索、快捷键和大输出稳定性（`v0.1.70`）。
 4. SFTP 多选、批量、递归传输和远程文件查看。
 5. 本地 Shell。
 
@@ -267,16 +270,12 @@ P1 项用于对标 FinalShell、MobaXterm、Tabby、WindTerm：
 
 ## 13. 推荐开发顺序
 
-1. known_hosts 数据层、握手校验和 UI 确认流程。
-2. SSH Agent 三平台实现。
-3. 系统密钥链适配和旧 secret 迁移。
-4. TransferDescriptor、持久化队列和重连续传。
-5. ProxyJump 和单级跳板机。
-6. 本地/远程/SOCKS 转发。
-7. 终端 resize、搜索、本地 Shell。
-8. SFTP 多选、递归和冲突处理。
-9. macOS/Linux 适配与真实验收。
-10. 完成以上基础版本后，再恢复 Agent/MCP 开发。
+1. 完成 ProxyJump、混合认证和转发 generation 的真实集成验收。
+2. 开发 `v0.1.70` 终端 resize、搜索、快捷键和本地 Shell。
+3. 完成 TransferDescriptor、持久化队列和重连续传。
+4. 完善 SFTP 多选、递归和冲突处理。
+5. 完成 macOS/Linux 适配与真实验收。
+6. 完成以上基础版本后，再恢复 Agent/MCP 开发。
 
 ## 14. 完成定义
 
@@ -287,4 +286,3 @@ P1 项用于对标 FinalShell、MobaXterm、Tabby、WindTerm：
 - 所有连接状态不会把失败的 side session 误报为主终端断线。
 - 关键错误可读、可定位、无敏感信息泄露。
 - 三个平台有可重复的构建、安装和回归记录。
-

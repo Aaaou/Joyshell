@@ -45,7 +45,7 @@ Joyshell 是一个以 SSH 为核心的跨平台桌面工作区。项目使用 Ta
 
 设计目标很直接：连接服务器之后，终端输入、文件传输、系统观察和常用操作应当保持独立、清楚并且随时可达。
 
-当前版本以 Windows 为主要开发与验收平台。macOS 与 Linux 已保留同构工程和打包目标，仍需要持续的实机验证。
+当前正式版本为 `v0.1.69_build_4`，以 Windows x64 为主要开发与验收平台。macOS 与 Linux 已保留同构工程和打包目标，仍需要持续的实机验证。
 
 ## 界面预览
 
@@ -186,9 +186,10 @@ pnpm --filter @joyshell/desktop tauri build
 - [x] 系统信息、连接健康检查和断线反馈
 - [x] 桌面个性化、统一渐变和背景裁剪
 - [x] 私钥文件认证与可选加密口令
-- [ ] SSH Agent 与 known_hosts 工作流
-- [ ] 跳板机、端口转发与本地 Shell
-- [ ] 持久化传输队列与自动重连策略
+- [x] SSH Agent 与 known_hosts 工作流
+- [x] 跳板机、端口转发与 SSH 自动重连策略
+- [ ] 持久化传输队列与应用重启后恢复
+- [ ] Windows 本地 Shell 与终端体验增强（v0.1.70）
 - [ ] Agentic Loop、模型 Provider 与审批工作流
 - [ ] MCP 管理、CLI 与扩展接口
 - [ ] Standard / Lite 编译特性、产物命名与自动发布矩阵
